@@ -15,7 +15,7 @@ export KERNEL_CFG
 export OUT_DIR
 
 # Set compiler PATH
-PATH={$HOME}/evo/prebuilts/clang/host/linux-x86/clang-r487747c:$HOME/clang/bin:$PATH
+PATH={$HOME}/evo/prebuilts/clang/host/linux-x86/clang-r530567:$HOME/clang/bin:$PATH
 
 BUILD="make O=$OUT_DIR \
 ARCH=arm64 \
