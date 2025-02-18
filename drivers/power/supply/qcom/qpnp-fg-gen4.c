@@ -6992,8 +6992,8 @@ static int fg_gen4_parse_dt(struct fg_gen4_chip *chip)
 					"qcom,multi-profile-load");
 	chip->dt.soc_hi_res = of_property_read_bool(node, "qcom,soc-hi-res");
 	chip->dt.sun_profile_only = of_property_read_bool(node, "qcom,sun-profile-only");
-	chip->dt.j3s_batt_profile = of_property_read_bool(node, "qcom,j3s-batt-profile");
 	chip->dt.k11a_batt_profile = of_property_read_bool(node, "qcom,k11a-batt-profile");
+        chip->dt.j3s_batt_profile = of_property_read_bool(node, "qcom,j3s-batt-profile");
 
 	chip->dt.fg_increase_100soc_time = of_property_read_bool(node, "qcom,fg-increase-100soc-time");
 	fg->param.smooth_batt_flag = of_property_read_bool(node, "qcom,fg-increase-100soc-time-2");
