@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2017-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #include <linux/uaccess.h>
@@ -2215,7 +2215,7 @@ static int cam_ope_mgr_process_cmd_buf_req(struct cam_ope_hw_mgr *hw_mgr,
 					ope_request->ope_kmd_buf.offset =
 						cmd_buf->offset;
 					ope_request->ope_kmd_buf.size =
-						cmd_buf->size;
+						cmd_buf->length;
 					is_kmd_buf_valid = true;
 					CAM_DBG(CAM_OPE, "kbuf:%x io:%x cdm:%x",
 					ope_request->ope_kmd_buf.cpu_addr,
@@ -2299,6 +2299,7 @@ static int cam_ope_mgr_process_cmd_desc(struct cam_ope_hw_mgr *hw_mgr,
 	struct cam_cmd_buf_desc *cmd_desc = NULL;
 	uintptr_t cpu_addr = 0;
 	struct cam_ope_request *ope_request;
+	int generic_cmd_buf_count = 0;
 
 	cmd_desc = (struct cam_cmd_buf_desc *)
 		((uint32_t *) &packet->payload + packet->cmd_buf_offset/4);
@@ -2313,6 +2314,13 @@ static int cam_ope_mgr_process_cmd_desc(struct cam_ope_hw_mgr *hw_mgr,
 			cmd_desc[i].meta_data == OPE_CMD_META_GENERIC_BLOB)
 			continue;
 
+		if (generic_cmd_buf_count > 0) {
+			CAM_ERR(CAM_OPE, "Multiple generic command buffers not supported");
+			rc = -EINVAL;
+			goto end;
+		}
+
+		generic_cmd_buf_count++;
 		rc = cam_mem_get_cpu_buf(cmd_desc[i].mem_handle,
 			&cpu_addr, &len);
 		if (rc || !cpu_addr) {
