@@ -286,6 +286,36 @@ First Level Node - FG Gen4 device
 		    cycle. If this is not specified, then the default value
 		    used will be 5 (0.5%). Unit is in decipercentage.
 
+- qcom,replacement-capacity-learning
+Usage: optional
+Value type: <empty>
+Definition: Enables learned-capacity reporting for unidentified replacement
+            batteries using the device fallback fuel-gauge profile. This
+            property does not alter battery profile selection, charging
+            voltage, charging current, or JEITA configuration.
+
+- qcom,replacement-capacity-high-threshold-mah
+Usage: optional
+Value type: <u32>
+Definition: Minimum learned full-charge capacity in mAh required before an
+            unidentified replacement battery is reported using learned
+            capacity instead of the fallback profile nominal capacity.
+            Default value is 4850 mAh.
+
+- qcom,replacement-capacity-max-mah
+Usage: optional
+Value type: <u32>
+Definition: Maximum plausible learned replacement-battery capacity in mAh.
+            Learned values above this threshold are ignored for design
+            capacity reporting. Default value is 5300 mAh.
+
+- qcom,replacement-cl-max-increment
+Usage: optional
+Value type: <u32>
+Definition: Maximum upward capacity-learning correction used for an
+            unidentified replacement battery, in decipercentage per
+            qualified learning cycle. Default value is 20 (2.0%).
+
 - qcom,cl-max-decrement
 	Usage:      optional
 	Value type: <u32>

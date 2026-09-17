@@ -227,6 +227,10 @@ struct fg_dt_props {
 	bool	fg_increase_100soc_time;
 	bool	shutdown_delay_enable;
 	bool	cutoff_voltage_adjust_enable;
+	bool	replacement_capacity_learning;
+	int	replacement_capacity_high_mah;
+	int	replacement_capacity_max_mah;
+	int	replacement_cl_max_inc;
 	int	*dec_rate_seq;
 	int	dec_rate_len;
 	int	cutoff_volt_mv;
@@ -349,6 +353,8 @@ struct fg_gen4_chip {
 	bool			chg_term_good;
 	bool			soc_scale_mode;
 	bool			fastcharge_mode_enabled;
+	bool			replacement_profile_fallback;
+	int			cl_max_cap_inc_normal;
 	int                     hw_country;
 };
 
@@ -2083,6 +2089,14 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 	const char *data;
 	int rc, len, avail_age_level = 0;
 
+	/*
+	 * Start every lookup as a normal/known battery.  Only the final
+	 * unidentified K11A fallback below marks the pack as a replacement.
+	 */
+	chip->replacement_profile_fallback = false;
+	if (chip->cl)
+		chip->cl->dt.max_cap_inc = chip->cl_max_cap_inc_normal;
+
 	batt_node = of_parse_phandle(node, "qcom,battery-data", 0);
 	/* Retain legacy trees without an explicit battery-data reference. */
 	if (!batt_node && !of_find_property(node, "qcom,battery-data", NULL))
@@ -2164,6 +2178,7 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 			} else {
 				if (chip->dt.k11a_batt_profile) {
 					pr_warn("verifty battery fail. use default profile k11a_fmt_4520mah\n");
+					chip->replacement_profile_fallback = true;
 					profile_node = of_batterydata_get_best_profile(batt_node,
 						fg->batt_id_ohms / 1000, "K11A_FMT_4520mah");
 				} else if (chip->dt.j3s_batt_profile) {
@@ -2238,6 +2253,15 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 	rc = fg_gen4_get_batt_profile_dt_props(chip, profile_node);
 	if (rc < 0)
 		return rc;
+
+	if (chip->cl && chip->replacement_profile_fallback &&
+	    chip->dt.replacement_capacity_learning) {
+		chip->cl->dt.max_cap_inc =
+			chip->dt.replacement_cl_max_inc;
+
+		pr_info("unidentified replacement battery: capacity learning enabled, max increment=%d decipct\n",
+			chip->cl->dt.max_cap_inc);
+	}
 
 	return 0;
 }
@@ -5281,7 +5305,40 @@ static int fg_psy_get_property(struct power_supply *psy,
 		if (!rc)
 			pval->intval = (int)temp;
 		break;
-	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN: {
+		int64_t learned_cap_uah = 0;
+
+		/*
+		 * For an unidentified replacement pack, retain the conservative
+		 * FMT charging profile but expose a learned high-capacity value
+		 * once Qualcomm capacity learning has moved convincingly above
+		 * the stock 4520 mAh range.
+		 *
+		 * Reporting only: never change BATTERY_TYPE, FV, FCC or JEITA.
+		 */
+		if (chip->dt.replacement_capacity_learning &&
+		    chip->replacement_profile_fallback) {
+			rc = fg_gen4_get_learned_capacity(chip,
+							  &learned_cap_uah);
+
+			if (!rc &&
+			    learned_cap_uah >=
+				(int64_t)chip->dt.replacement_capacity_high_mah *
+					1000 &&
+			    learned_cap_uah <=
+				(int64_t)chip->dt.replacement_capacity_max_mah *
+					1000) {
+				pval->intval = (int)learned_cap_uah;
+				break;
+			}
+
+			/*
+			 * Failure to read learned capacity must not break the normal
+			 * fallback design-capacity property.
+			 */
+			rc = 0;
+		}
+
 		if (-EINVAL != fg->bp.nom_cap_uah) {
 			pval->intval = fg->bp.nom_cap_uah * 1000;
 		} else {
@@ -5290,6 +5347,7 @@ static int fg_psy_get_property(struct power_supply *psy,
 				pval->intval = (int)temp;
 		}
 		break;
+	}
 	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
 		rc = fg_gen4_get_charge_counter(chip, &pval->intval);
 		break;
@@ -6628,6 +6686,20 @@ static int fg_gen4_parse_nvmem_dt(struct fg_gen4_chip *chip)
 #define DEFAULT_CL_MIN_TEMP_DECIDEGC	150
 #define DEFAULT_CL_MAX_TEMP_DECIDEGC	500
 #define DEFAULT_CL_MAX_INC_DECIPERC	5
+
+/*
+ * Unidentified replacement battery capacity learning.
+ *
+ * Battery ID resistance must not be used to select a higher-capacity
+ * charging profile on alioth because FMT, GY, J3S and many aftermarket
+ * packs share approximately the same 100 kOhm ID.
+ *
+ * These values affect capacity learning/reporting only.
+ */
+#define DEFAULT_REPL_CAP_HIGH_MAH	4850
+#define DEFAULT_REPL_CAP_MAX_MAH	5300
+#define DEFAULT_REPL_CL_MAX_INC_DECIPERC	20
+
 #define DEFAULT_CL_MAX_DEC_DECIPERC	100
 #define DEFAULT_CL_MIN_LIM_DECIPERC	0
 #define DEFAULT_CL_MAX_LIM_DECIPERC	0
@@ -6637,6 +6709,7 @@ static void fg_gen4_parse_cl_params_dt(struct fg_gen4_chip *chip)
 {
 	struct fg_dev *fg = &chip->fg;
 	struct device_node *node = fg->dev->of_node;
+	u32 temp;
 
 	chip->cl->dt.max_start_soc = DEFAULT_CL_START_SOC;
 	of_property_read_u32(node, "qcom,cl-start-capacity",
@@ -6656,6 +6729,51 @@ static void fg_gen4_parse_cl_params_dt(struct fg_gen4_chip *chip)
 	chip->cl->dt.max_cap_inc = DEFAULT_CL_MAX_INC_DECIPERC;
 	of_property_read_u32(node, "qcom,cl-max-increment",
 				&chip->cl->dt.max_cap_inc);
+
+	/*
+	 * Preserve the device's normal learning limit.  An unidentified
+	 * replacement pack may use a less restrictive upward-learning limit,
+	 * but known battery profiles retain this value.
+	 */
+	chip->cl_max_cap_inc_normal = chip->cl->dt.max_cap_inc;
+
+	chip->dt.replacement_capacity_learning =
+		of_property_read_bool(node,
+			"qcom,replacement-capacity-learning");
+
+	chip->dt.replacement_capacity_high_mah =
+		DEFAULT_REPL_CAP_HIGH_MAH;
+	if (!of_property_read_u32(node,
+			"qcom,replacement-capacity-high-threshold-mah", &temp))
+		chip->dt.replacement_capacity_high_mah = temp;
+
+	chip->dt.replacement_capacity_max_mah =
+		DEFAULT_REPL_CAP_MAX_MAH;
+	if (!of_property_read_u32(node,
+			"qcom,replacement-capacity-max-mah", &temp))
+		chip->dt.replacement_capacity_max_mah = temp;
+
+	chip->dt.replacement_cl_max_inc =
+		DEFAULT_REPL_CL_MAX_INC_DECIPERC;
+	if (!of_property_read_u32(node,
+			"qcom,replacement-cl-max-increment", &temp))
+		chip->dt.replacement_cl_max_inc = temp;
+
+	/*
+	 * Never make replacement-pack learning more restrictive than the
+	 * normal device configuration.
+	 */
+	if (chip->dt.replacement_cl_max_inc <
+			chip->cl_max_cap_inc_normal)
+		chip->dt.replacement_cl_max_inc =
+			chip->cl_max_cap_inc_normal;
+
+	if (chip->dt.replacement_capacity_high_mah <= 0 ||
+	    chip->dt.replacement_capacity_max_mah <=
+			chip->dt.replacement_capacity_high_mah) {
+		pr_warn("invalid replacement capacity thresholds; disabling replacement capacity learning\n");
+		chip->dt.replacement_capacity_learning = false;
+	}
 
 	chip->cl->dt.max_cap_dec = DEFAULT_CL_MAX_DEC_DECIPERC;
 	of_property_read_u32(node, "qcom,cl-max-decrement",
