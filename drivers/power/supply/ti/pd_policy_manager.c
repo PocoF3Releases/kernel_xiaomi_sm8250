@@ -441,6 +441,39 @@ static bool pd_get_fastcharge_mode_enabled(struct usbpd_pm *pdpm)
 	else
 		return false;
 }
+
+/* Millivolt rounding must never raise a microvolt profile limit. */
+static int usbpd_pm_limit_battery_voltage(int board_mv, int profile_uv)
+{
+	if (board_mv <= 0 || profile_uv < 3500000 || profile_uv > 5000000)
+		return -EINVAL;
+
+	return min(board_mv, profile_uv / 1000);
+}
+
+static int usbpd_pm_update_bat_volt_limit(struct usbpd_pm *pdpm)
+{
+	union power_supply_propval prop = {0, };
+	int rc, limit;
+
+	limit = pd_get_fastcharge_mode_enabled(pdpm) ?
+		pdpm->bat_volt_max : pdpm->non_ffc_bat_volt_max;
+	if (pdpm->respect_bms_voltage_limit) {
+		usbpd_check_bms_psy(pdpm);
+		if (!pdpm->bms_psy)
+			return -ENODEV;
+		rc = power_supply_get_property(pdpm->bms_psy,
+				POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN, &prop);
+		if (rc < 0)
+			return rc;
+		limit = usbpd_pm_limit_battery_voltage(limit, prop.intval);
+		if (limit < 0)
+			return limit;
+	}
+
+	pm_config.bat_volt_lp_lmt = limit;
+	return 0;
+}
 /* get bq27z561 fastcharge mode to enable or disabled */
 
 /* get pd pps charger verified result  */
@@ -1002,13 +1035,14 @@ static int usbpd_pm_fc2_charge_algo(struct usbpd_pm *pdpm)
 	int capacity = 0;
 	static int ibus_limit;
 
+	if (usbpd_pm_update_bat_volt_limit(pdpm) < 0)
+		return PM_ALGO_RET_CHG_DISABLED;
+
 	is_fastcharge_mode = pd_get_fastcharge_mode_enabled(pdpm);
 	if (is_fastcharge_mode) {
-		pm_config.bat_volt_lp_lmt = pdpm->bat_volt_max;
 		bq_taper_hys_mv = BQ_TAPER_HYS_MV;
 		pm_config.fc2_taper_current = TAPER_DONE_FFC_MA;
 	} else {
-		pm_config.bat_volt_lp_lmt = pdpm->non_ffc_bat_volt_max;
 		bq_taper_hys_mv = NON_FFC_BQ_TAPER_HYS_MV;
 		pm_config.fc2_taper_current = TAPER_DONE_NORMAL_MA;
 	}
@@ -1397,6 +1431,18 @@ static int usbpd_pm_sm(struct usbpd_pm *pdpm)
 	int effective_fcc_val = 0;
 	int thermal_level = 0, capacity;
 	static int curr_fcc_lmt, curr_ibus_lmt;
+
+	/* Check before entering/enabling the pump, not only after tuning starts. */
+	if (pdpm->respect_bms_voltage_limit &&
+	    pdpm->state != PD_PM_STATE_FC2_EXIT) {
+		ret = usbpd_pm_update_bat_volt_limit(pdpm);
+		if (ret < 0) {
+			pr_err_ratelimited("BMS voltage limit unavailable, rc=%d\n", ret);
+			stop_sw = false;
+			recover = true;
+			usbpd_pm_move_state(pdpm, PD_PM_STATE_FC2_EXIT);
+		}
+	}
 
 	switch (pdpm->state) {
 	case PD_PM_STATE_ENTRY:
@@ -1927,6 +1973,9 @@ static int pd_policy_parse_dt(struct usbpd_pm *pdpm)
 		pr_err("device tree node missing\n");
 		return -EINVAL;
 	}
+
+	pdpm->respect_bms_voltage_limit =
+		of_property_read_bool(node, "mi,respect-bms-voltage-limit");
 
 	rc = of_property_read_u32(node, "mi,pd-bat-volt-max",
 				  &pdpm->bat_volt_max);

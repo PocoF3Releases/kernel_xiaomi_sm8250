@@ -676,6 +676,7 @@ And public attribution of xiaomi platforms(like alioth and so and)
 		compatible = "xiaomi,usbpd-pm";
 		status = "ok";
 		mi,pd-bat-volt-max = <4460>;
+		mi,respect-bms-voltage-limit;
 		mi,pd-bat-curr-max = <6000>;
 		mi,pd-bus-volt-max = <12000>;
 		mi,pd-bus-curr-max = <3000>;

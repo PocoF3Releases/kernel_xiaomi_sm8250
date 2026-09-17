@@ -1,0 +1,15 @@
+Xiaomi USB-PD charge-pump battery-profile voltage opt-in
+
+For compatible = "xiaomi,usbpd-pm":
+
+- mi,respect-bms-voltage-limit
+  Usage: optional
+  Value type: <empty>
+  Definition: Limit the battery-voltage control-loop target to the smaller
+    of the configured FFC/non-FFC board limit and BMS VOLTAGE_MAX_DESIGN.
+    The BMS property is in microvolts and is rounded down to millivolts.
+    Values outside 3500000..5000000 uV or unavailable properties cause
+    charge-pump operation to stop/retry via the switching-charger path.
+    The check runs before pump entry and throughout tuning. If absent,
+    preserve the original board/mode voltage policy. This property does
+    not raise board limits or change current, JEITA or thermal settings.
