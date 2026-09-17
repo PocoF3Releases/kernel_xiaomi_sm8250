@@ -218,6 +218,7 @@ struct usbpd_pm {
 
 	int pd_active;
 	bool pps_supported;
+	bool respect_bms_voltage_limit;
 	bool fc2_exit_flag;
 
 	int request_voltage;
