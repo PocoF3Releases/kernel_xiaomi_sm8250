@@ -716,3 +716,10 @@ thermal_zones {
 		};
 	};
 };
+
+Replacement cycle-count policy:
+  When qcom,replacement-battery-type names the successfully selected
+  unidentified fallback, report the persistent FG bucket average through
+  CYCLE_COUNT and do not synchronize it into the DS28E16 one-way counter.
+  Identified profiles retain the authenticator-backed count when enabled.
+  No counters are cleared to infer a replacement battery's physical age.

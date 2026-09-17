@@ -370,6 +370,35 @@ static bool is_batt_vendor_gyb;
 static bool is_batt_vendor_nvt;
 static bool is_low_temp_flag;
 
+static bool fg_gen4_uses_fg_cycle_count(struct fg_gen4_chip *chip)
+{
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+	/* The authenticator may have been reused with a different cell. */
+	return chip->dt.replacement_battery_type &&
+		READ_ONCE(chip->replacement_profile_fallback);
+#else
+	return true;
+#endif
+}
+
+static int fg_gen4_get_cycle_count(struct fg_gen4_chip *chip, int *count)
+{
+	if (!chip || !count)
+		return -EINVAL;
+	if (!chip->fg.soc_reporting_ready || !chip->fg.profile_available)
+		return -ENODATA;
+	if (fg_gen4_uses_fg_cycle_count(chip))
+		return get_cycle_count(chip->counter, count);
+#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
+	*count = READ_ONCE(chip->fg.maxim_cycle_count);
+	if (*count < 0)
+		return -ENODATA;
+	return 0;
+#else
+	return -ENODATA;
+#endif
+}
+
 static bool fg_profile_dump;
 static ssize_t profile_dump_show(struct device *dev, struct device_attribute
 		*attr, char *buf)
@@ -743,31 +772,59 @@ static int fg_gen4_get_nominal_capacity(struct fg_gen4_chip *chip,
 	return 0;
 }
 
+/* 1: migrated, 0: no cookie, negative: I/O failure (not an empty SDAM). */
+static int fg_gen4_sdam_cookie_status(struct fg_gen4_chip *chip)
+{
+	u8 cookie[4];
+	u32 value;
+	int rc;
+
+	if (!chip->fg_nvmem)
+		return 0;
+	rc = nvmem_device_read(chip->fg_nvmem, SDAM_COOKIE_OFFSET_4BYTE,
+			      sizeof(cookie), cookie);
+	if (rc < 0)
+		return rc;
+	if (rc != sizeof(cookie))
+		return -EIO;
+	value = cookie[0] | (u32)cookie[1] << 8 |
+		(u32)cookie[2] << 16 | (u32)cookie[3] << 24;
+	return value == SDAM_COOKIE_4BYTE;
+}
+
 static int fg_gen4_get_learned_capacity(void *data, int64_t *learned_cap_uah)
 {
 	struct fg_gen4_chip *chip = data;
 	struct fg_dev *fg;
-	int rc, act_cap_mah;
+	int rc, act_cap_mah, migrated;
 	u8 buf[2];
 
 	if (!chip)
 		return -ENODEV;
 
 	fg = &chip->fg;
-	if (chip->fg_nvmem)
-		rc = nvmem_device_read(chip->fg_nvmem, SDAM_CAP_LEARN_OFFSET, 2,
-					buf);
-	else
-		rc = fg_get_sram_prop(fg, FG_SRAM_ACT_BATT_CAP, &act_cap_mah);
-	if (rc < 0) {
-		pr_err("Error in getting learned capacity, rc=%d\n", rc);
-		return rc;
-	}
 
-	if (chip->fg_nvmem)
-		*learned_cap_uah = (buf[0] | buf[1] << 8) * 1000;
-	else
-		*learned_cap_uah = act_cap_mah * 1000;
+	if (!learned_cap_uah)
+		return -EINVAL;
+	migrated = fg_gen4_sdam_cookie_status(chip);
+	if (migrated < 0)
+		return migrated;
+	if (migrated) {
+		rc = nvmem_device_read(chip->fg_nvmem, SDAM_CAP_LEARN_OFFSET,
+				      sizeof(buf), buf);
+		if (rc < 0)
+			return rc;
+		if (rc != sizeof(buf))
+			return -EIO;
+		act_cap_mah = buf[0] | (u16)buf[1] << 8;
+	} else {
+		rc = fg_get_sram_prop(fg, FG_SRAM_ACT_BATT_CAP, &act_cap_mah);
+		if (rc < 0)
+			return rc;
+	}
+	if (act_cap_mah < 0 || act_cap_mah > 32767)
+		return -ERANGE;
+	*learned_cap_uah = (int64_t)act_cap_mah * 1000;
 
 	fg_dbg(fg, FG_CAP_LEARN, "learned_cap_uah:%lld\n", *learned_cap_uah);
 	return 0;
@@ -1428,6 +1485,9 @@ static int fg_gen4_store_learned_capacity(void *data, int64_t learned_cap_uah)
 			return rc;
 		}
 
+		if (rc != 2)
+			return -EIO;
+
 		/* The full post-profile migration owns the SDAM cookie. */
 	}
 
@@ -1519,55 +1579,67 @@ static int fg_gen4_get_cc_soc_sw(void *data, int *cc_soc_sw)
 static int fg_gen4_restore_count(void *data, u16 *buf, int length)
 {
 	struct fg_gen4_chip *chip = data;
-	int id, rc = 0;
-	u8 tmp[2];
+	u8 raw[BUCKET_COUNT * 2];
+	int id, rc, migrated;
 
 	if (!chip)
 		return -ENODEV;
-
-	if (!buf || length > BUCKET_COUNT)
+	if (!buf || length <= 0 || length > BUCKET_COUNT)
 		return -EINVAL;
 
-	for (id = 0; id < length; id++) {
-		if (chip->fg_nvmem)
-			rc = nvmem_device_read(chip->fg_nvmem,
-				SDAM_CYCLE_COUNT_OFFSET + (id * 2), 2, tmp);
-		else
-			rc = fg_sram_read(&chip->fg, CYCLE_COUNT_WORD + id,
-					CYCLE_COUNT_OFFSET, (u8 *)tmp, 2,
-					FG_IMA_DEFAULT);
-		if (rc < 0)
-			pr_err("failed to read bucket %d rc=%d\n", id, rc);
-		else
-			*buf++ = tmp[0] | tmp[1] << 8;
+	migrated = fg_gen4_sdam_cookie_status(chip);
+	if (migrated < 0)
+		return migrated;
+	if (migrated) {
+		rc = nvmem_device_read(chip->fg_nvmem, SDAM_CYCLE_COUNT_OFFSET,
+				      length * 2, raw);
+		if (rc >= 0 && rc != length * 2)
+			return -EIO;
+	} else {
+		rc = fg_sram_read(&chip->fg, CYCLE_COUNT_WORD,
+				  CYCLE_COUNT_OFFSET, raw, length * 2,
+				  FG_IMA_DEFAULT);
 	}
+	if (rc < 0)
+		return rc;
 
-	return rc;
+	/* Do not compact later buckets over one that failed to read. */
+	for (id = 0; id < length; id++)
+		buf[id] = raw[id * 2] | (u16)raw[id * 2 + 1] << 8;
+	return 0;
 }
 
 static int fg_gen4_store_count(void *data, u16 *buf, int id, int length)
 {
 	struct fg_gen4_chip *chip = data;
-	int rc;
+	u8 raw[BUCKET_COUNT * 2];
+	int i, rc;
 
 	if (!chip)
 		return -ENODEV;
-
-	if (!buf || length > BUCKET_COUNT * 2 || id < 0 ||
-		id > BUCKET_COUNT - 1 || ((id * 2) + length) > BUCKET_COUNT * 2)
+	if (!buf || length <= 0 || length > sizeof(raw) || (length & 1) ||
+	    id < 0 || id >= BUCKET_COUNT || id * 2 + length > sizeof(raw))
 		return -EINVAL;
 
-	if (chip->fg_nvmem)
-		rc = nvmem_device_write(chip->fg_nvmem,
-			SDAM_CYCLE_COUNT_OFFSET + (id * 2), length, (u8 *)buf);
-	else
-		rc = fg_sram_write(&chip->fg, CYCLE_COUNT_WORD + id,
-				CYCLE_COUNT_OFFSET, (u8 *)buf, length,
-				FG_IMA_DEFAULT);
+	for (i = 0; i < length / 2; i++) {
+		raw[i * 2] = buf[i] & 0xff;
+		raw[i * 2 + 1] = buf[i] >> 8;
+	}
+	/* Keep the SRAM migration source current as well as the SDAM copy. */
+	rc = fg_sram_write(&chip->fg, CYCLE_COUNT_WORD + id,
+			   CYCLE_COUNT_OFFSET, raw, length, FG_IMA_DEFAULT);
 	if (rc < 0)
-		pr_err("failed to write bucket %d rc=%d\n", id, rc);
-
-	return rc;
+		return rc;
+	if (chip->fg_nvmem) {
+		rc = nvmem_device_write(chip->fg_nvmem,
+				       SDAM_CYCLE_COUNT_OFFSET + id * 2,
+				       length, raw);
+		if (rc < 0)
+			return rc;
+		if (rc != length)
+			return -EIO;
+	}
+	return 0;
 }
 
 /* All worker and helper functions below */
@@ -2603,47 +2675,53 @@ static int qpnp_fg_gen4_load_profile(struct fg_gen4_chip *chip)
 	return 0;
 }
 
-static bool is_sdam_cookie_set(struct fg_gen4_chip *chip)
+
+
+/* Called under the cycle-counter and capacity-learning locks. */
+static int fg_gen4_migrate_sdam(struct fg_gen4_chip *chip)
 {
-	struct fg_dev *fg = &chip->fg;
-	int rc;
-	u32 cookie_4byte;
+	u8 counts[BUCKET_COUNT * 2], capacity[2];
+	u8 cookie[4] = { 0x78, 0x56, 0x34, 0x12 };
+	int rc, act_cap_mah;
 
-	rc = nvmem_device_read(chip->fg_nvmem, SDAM_COOKIE_OFFSET_4BYTE, 4,
-			&cookie_4byte);
-	if (rc < 0) {
-		pr_err("Error in reading SDAM_COOKIE rc=%d\n", rc);
-		return false;
-	}
+	if (!chip->fg_nvmem)
+		return 0;
+	rc = fg_gen4_sdam_cookie_status(chip);
+	if (rc != 0)
+		return rc < 0 ? rc : 0;
 
-	fg_dbg(fg, FG_STATUS, "cookie_4byte: %08x\n", cookie_4byte);
-	return (cookie_4byte == SDAM_COOKIE_4BYTE);
-}
-
-static void fg_gen4_clear_sdam(struct fg_gen4_chip *chip)
-{
-	struct fg_dev *fg = &chip->fg;
-	u8 buf[SDAM_FG_PARAM_LENGTH] = { 0 };
-	int rc;
-
-	/*
-	 * Clear all bytes of SDAM used to store FG parameters when it is first
-	 * profile load so that the junk values would not be used.
-	 */
-	rc = nvmem_device_write(chip->fg_nvmem, SDAM_CYCLE_COUNT_OFFSET,
-			SDAM_FG_PARAM_LENGTH, buf);
+	/* Validate all source reads before altering the destination. */
+	rc = fg_sram_read(&chip->fg, CYCLE_COUNT_WORD, CYCLE_COUNT_OFFSET,
+			  counts, sizeof(counts), FG_IMA_DEFAULT);
 	if (rc < 0)
-		pr_err("Error in clearing SDAM rc=%d\n", rc);
-	else
-		fg_dbg(fg, FG_STATUS, "Cleared SDAM\n");
+		return rc;
+	rc = fg_get_sram_prop(&chip->fg, FG_SRAM_ACT_BATT_CAP, &act_cap_mah);
+	if (rc < 0)
+		return rc;
+	if (act_cap_mah <= 0 || act_cap_mah > 32767)
+		return -ERANGE;
+	capacity[0] = act_cap_mah & 0xff;
+	capacity[1] = act_cap_mah >> 8;
+
+	rc = nvmem_device_write(chip->fg_nvmem, SDAM_CYCLE_COUNT_OFFSET,
+			       sizeof(counts), counts);
+	if (rc != sizeof(counts))
+		return rc < 0 ? rc : -EIO;
+	rc = nvmem_device_write(chip->fg_nvmem, SDAM_CAP_LEARN_OFFSET,
+			       sizeof(capacity), capacity);
+	if (rc != sizeof(capacity))
+		return rc < 0 ? rc : -EIO;
+	/* Publish validity last, only after both complete records are stored. */
+	rc = nvmem_device_write(chip->fg_nvmem, SDAM_COOKIE_OFFSET_4BYTE,
+			       sizeof(cookie), cookie);
+	return rc == sizeof(cookie) ? 0 : (rc < 0 ? rc : -EIO);
 }
 
-static void fg_gen4_post_profile_load(struct fg_gen4_chip *chip)
+static int fg_gen4_post_profile_load(struct fg_gen4_chip *chip)
 {
 	struct fg_dev *fg = &chip->fg;
-	int rc = 0, act_cap_mah;
+	int rc;
 	u8 buf[16] = {0};
-	u32 cookie_4byte = 0;
 
 	if (chip->dt.multi_profile_load &&
 		chip->batt_age_level != chip->last_batt_age_level) {
@@ -2669,48 +2747,21 @@ static void fg_gen4_post_profile_load(struct fg_gen4_chip *chip)
 		mutex_unlock(&chip->esr_calib_lock);
 	}
 
-	/* If SDAM cookie is not set, read back from SRAM and load it in SDAM */
-	if (chip->fg_nvmem && !is_sdam_cookie_set(chip)) {
-		fg_gen4_clear_sdam(chip);
-		rc = fg_sram_read(&chip->fg, CYCLE_COUNT_WORD,
-					CYCLE_COUNT_OFFSET, buf, 16,
-					FG_IMA_DEFAULT);
-		if (rc < 0) {
-			pr_err("Error in reading cycle counters from SRAM rc=%d\n",
-				rc);
-		} else {
-			rc = nvmem_device_write(chip->fg_nvmem,
-				SDAM_CYCLE_COUNT_OFFSET, 16, (u8 *)buf);
-			if (rc < 0)
-				pr_err("Error in writing cycle counters to SDAM rc=%d\n",
-					rc);
-		}
 
-		rc = fg_get_sram_prop(fg, FG_SRAM_ACT_BATT_CAP, &act_cap_mah);
-		if (rc < 0) {
-			pr_err("Error in getting learned capacity, rc=%d\n",
-				rc);
-		} else {
-			rc = nvmem_device_write(chip->fg_nvmem,
-				SDAM_CAP_LEARN_OFFSET, 2, (u8 *)&act_cap_mah);
-			if (rc < 0)
-				pr_err("Error in writing learned capacity to SDAM, rc=%d\n",
-					rc);
-		}
-
-		/* Set the COOKIE to prevent rechecking the SRAM again */
-		cookie_4byte = SDAM_COOKIE_4BYTE;
-		rc = nvmem_device_write(chip->fg_nvmem,
-			SDAM_COOKIE_OFFSET_4BYTE, 4, (u8 *)&cookie_4byte);
-		if (rc < 0)
-			pr_err("Failed to set SDAM cookie, rc=%d\n", rc);
+	mutex_lock(&chip->counter->lock);
+	mutex_lock(&chip->cl->lock);
+	rc = fg_gen4_migrate_sdam(chip);
+	if (rc < 0) {
+		chip->counter->initialized = false;
+		chip->counter->last_error = rc;
+		chip->cl->initialized = false;
+		chip->cl->last_error = rc;
 	}
-
-	/* Restore the cycle counters so that it would be valid at this point */
-	rc = restore_cycle_count(chip->counter);
+	mutex_unlock(&chip->cl->lock);
+	mutex_unlock(&chip->counter->lock);
 	if (rc < 0)
-		pr_err("Error in restoring cycle_count, rc=%d\n", rc);
-
+		return rc;
+	return restore_cycle_count(chip->counter);
 }
 
 static void profile_load_work(struct work_struct *work)
@@ -2722,7 +2773,7 @@ static void profile_load_work(struct work_struct *work)
 				struct fg_gen4_chip, fg);
 	int64_t nom_cap_uah, learned_cap_uah = 0;
 	u8 val, buf[2];
-	int rc;
+	int rc, history_rc;
 
 	vote(fg->awake_votable, PROFILE_LOAD, true, 0);
 
@@ -2746,11 +2797,7 @@ static void profile_load_work(struct work_struct *work)
 	if (!is_profile_load_required(chip))
 		goto done;
 
-	if (!chip->dt.multi_profile_load) {
-		clear_cycle_count(chip->counter);
-		if (chip->fg_nvmem && !is_sdam_cookie_set(chip))
-			fg_gen4_clear_sdam(chip);
-	}
+	/* A profile update is not evidence that the physical cell is new. */
 
 	fg_dbg(fg, FG_STATUS, "profile loading started\n");
 
@@ -2803,7 +2850,9 @@ done:
 		chip->first_profile_load = true;
 	}
 
-	fg_gen4_post_profile_load(chip);
+	history_rc = fg_gen4_post_profile_load(chip);
+	if (history_rc < 0)
+		pr_err("Error restoring FG history, rc=%d\n", history_rc);
 
 	rc = fg_gen4_bp_params_config(fg);
 	if (rc < 0)
@@ -2811,7 +2860,7 @@ done:
 			rc);
 
 	rc = fg_gen4_get_nominal_capacity(chip, &nom_cap_uah);
-	if (!rc) {
+	if (!rc && !history_rc) {
 		rc = cap_learning_post_profile_init(chip->cl, nom_cap_uah);
 		if (rc < 0)
 			pr_err("Error in cap_learning_post_profile_init rc=%d\n",
@@ -4652,48 +4701,54 @@ static void ds_page0_work(struct work_struct *work)
 	}
 }
 
-#define MAX_CYCLE_COUNT_CHECK 5
 static int sync_cycle_count(struct fg_gen4_chip *chip)
 {
 	struct fg_dev *fg = &chip->fg;
-	union power_supply_propval prop = {0, };
-	static int cycle_count_check;
-	int cycle_count;
+	union power_supply_propval prop = { 0, };
+	int count, rc, previous;
 
-	get_cycle_count(chip->counter, &cycle_count);
+	if (!fg->soc_reporting_ready || !fg->profile_available)
+		return -EAGAIN;
+	if (fg_gen4_uses_fg_cycle_count(chip)) {
+		/* Do not burn the one-way counter on unidentified replacements. */
+		fg->cycle_count = INT_MIN;
+		WRITE_ONCE(fg->maxim_cycle_count, INT_MIN);
+		return 0;
+	}
+	rc = get_cycle_count(chip->counter, &count);
+	if (rc < 0)
+		return rc;
 	if (!fg->max_verify_psy) {
 		fg->max_verify_psy = power_supply_get_by_name("batt_verify");
-		if (!fg->max_verify_psy) {
-			pr_err("Could not find batt_verify_psy\n");
+		if (!fg->max_verify_psy)
 			return -ENODEV;
-		}
 	}
-
-	if (fg->cycle_count == INT_MIN) {
-		if (cycle_count || cycle_count_check > MAX_CYCLE_COUNT_CHECK)
-			fg->cycle_count = cycle_count;
-		else
-			cycle_count_check++;
-	}
-
-	if (fg->maxim_cycle_count == INT_MIN) {
-		power_supply_get_property(fg->max_verify_psy,
+	if (READ_ONCE(fg->maxim_cycle_count) == INT_MIN) {
+		rc = power_supply_get_property(fg->max_verify_psy,
 				POWER_SUPPLY_PROP_MAXIM_BATT_CYCLE_COUNT, &prop);
-		fg->maxim_cycle_count = prop.intval;
+		if (rc < 0 || prop.intval < 0)
+			return rc < 0 ? rc : -ENODATA;
+		WRITE_ONCE(fg->maxim_cycle_count, prop.intval);
 	}
 
-	if (fg->cycle_count != INT_MIN && fg->cycle_count < cycle_count) {
-		prop.intval = 1;
-		power_supply_set_property(fg->max_verify_psy,
-				POWER_SUPPLY_PROP_MAXIM_BATT_CYCLE_COUNT, &prop);
-		power_supply_get_property(fg->max_verify_psy,
-				POWER_SUPPLY_PROP_MAXIM_BATT_CYCLE_COUNT, &prop);
-		fg->maxim_cycle_count = prop.intval;
-		pr_info("fg cycle_count[%d], last cycle_count[%d], dc_value[%d]\n",
-					cycle_count, fg->cycle_count, fg->maxim_cycle_count);
-		fg->cycle_count++;
-	}
+	previous = fg->cycle_count;
+	fg->cycle_count = count;
+	/* Zero is a valid restored baseline. Do not replay restoration jumps. */
+	if (previous == INT_MIN || count <= previous || count - previous != 1)
+		return 0;
 
+	prop.intval = 1;
+	rc = power_supply_set_property(fg->max_verify_psy,
+				POWER_SUPPLY_PROP_MAXIM_BATT_CYCLE_COUNT, &prop);
+	WRITE_ONCE(fg->maxim_cycle_count, INT_MIN);
+	/* A failed response cannot prove that the irreversible write did not run. */
+	if (rc < 0)
+		return rc;
+	rc = power_supply_get_property(fg->max_verify_psy,
+				POWER_SUPPLY_PROP_MAXIM_BATT_CYCLE_COUNT, &prop);
+	if (rc < 0 || prop.intval < 0)
+		return rc < 0 ? rc : -ENODATA;
+	WRITE_ONCE(fg->maxim_cycle_count, prop.intval);
 	return 0;
 }
 
@@ -5022,7 +5077,40 @@ static ssize_t capacity_learning_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(capacity_learning);
 
+/* Board history is not proof of the age of an unidentified physical cell. */
+static ssize_t cycle_count_info_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct fg_gen4_chip *chip = dev_get_drvdata(dev);
+	struct cycle_counter *counter;
+	int i, total = 0, reported = -1, rc;
+	ssize_t len;
+
+	if (!chip || !chip->counter)
+		return -ENODEV;
+	counter = chip->counter;
+	rc = fg_gen4_get_cycle_count(chip, &reported);
+	mutex_lock(&counter->lock);
+	for (i = 0; i < BUCKET_COUNT; i++)
+		total += counter->count[i];
+	len = scnprintf(buf, PAGE_SIZE,
+		"source=%s\nreported=%d\nreport_error=%d\n"
+		"fg_initialized=%d\nfg_last_error=%d\nfg_cycles=%d\n",
+		fg_gen4_uses_fg_cycle_count(chip) ? "fuel-gauge" : "ds28e16",
+		rc < 0 ? -1 : reported, rc, counter->initialized,
+		counter->last_error,
+		counter->initialized ? total / BUCKET_COUNT : -1);
+	len += scnprintf(buf + len, PAGE_SIZE - len, "fg_buckets=");
+	for (i = 0; i < BUCKET_COUNT; i++)
+		len += scnprintf(buf + len, PAGE_SIZE - len, "%u%s",
+			counter->count[i], i == BUCKET_COUNT - 1 ? "\n" : " ");
+	mutex_unlock(&counter->lock);
+	return len;
+}
+static DEVICE_ATTR_RO(cycle_count_info);
+
 static struct attribute *fg_attrs[] = {
+	&dev_attr_cycle_count_info.attr,
 	&dev_attr_capacity_learning.attr,
 	&dev_attr_profile_dump.attr,
 	&dev_attr_sram_dump_period_ms.attr,
@@ -5353,11 +5441,7 @@ static int fg_psy_get_property(struct power_supply *psy,
 		rc = fg_gen4_get_charge_counter_shadow(chip, &pval->intval);
 		break;
 	case POWER_SUPPLY_PROP_CYCLE_COUNT:
-#ifdef CONFIG_BATT_VERIFY_BY_DS28E16
-		pval->intval = fg->maxim_cycle_count;
-#else
-		rc = get_cycle_count(chip->counter, &pval->intval);
-#endif
+		rc = fg_gen4_get_cycle_count(chip, &pval->intval);
 		break;
 	case POWER_SUPPLY_PROP_CYCLE_COUNTS:
 		rc = get_cycle_counts(chip->counter, &pval->strval);
