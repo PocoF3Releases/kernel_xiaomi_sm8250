@@ -353,6 +353,19 @@ static void cap_learning_post_process(struct cap_learning *cl)
 		}
 	}
 
+	/*
+	 * Optional absolute learned-capacity ceiling.  Unlike max_cap_limit,
+	 * which is relative to nominal capacity, this is expressed directly
+	 * in uAh and is useful when the physical replacement-pack range is
+	 * known.
+	 */
+	if (cl->dt.max_cap_uah > 0 &&
+	    cl->learned_cap_uah > cl->dt.max_cap_uah) {
+		pr_debug("learned capacity %lld exceeds absolute max %lld uAh\n",
+			cl->learned_cap_uah, cl->dt.max_cap_uah);
+		cl->learned_cap_uah = cl->dt.max_cap_uah;
+	}
+
 	if (cl->store_learned_capacity) {
 		rc = cl->store_learned_capacity(cl->data, cl->learned_cap_uah);
 		if (rc < 0)
@@ -759,6 +772,18 @@ int cap_learning_post_profile_init(struct cap_learning *cl, int64_t nom_cap_uah)
 			pr_debug("learned_cap_uah: %lld is higher than expected, capping it to nominal: %lld\n",
 				cl->learned_cap_uah, cl->nom_cap_uah);
 			cl->learned_cap_uah = cl->nom_cap_uah;
+		}
+
+		/*
+		 * Apply the absolute ceiling to values restored from persistent
+		 * storage too, so a stale value from an earlier battery cannot
+		 * remain above the configured replacement-pack limit.
+		 */
+		if (cl->dt.max_cap_uah > 0 &&
+		    cl->learned_cap_uah > cl->dt.max_cap_uah) {
+			pr_debug("restored learned capacity %lld exceeds absolute max %lld uAh\n",
+				cl->learned_cap_uah, cl->dt.max_cap_uah);
+			cl->learned_cap_uah = cl->dt.max_cap_uah;
 		}
 
 		rc = cl->store_learned_capacity(cl->data, cl->learned_cap_uah);

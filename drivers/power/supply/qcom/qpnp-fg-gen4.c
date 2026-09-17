@@ -2094,8 +2094,10 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 	 * unidentified K11A fallback below marks the pack as a replacement.
 	 */
 	chip->replacement_profile_fallback = false;
-	if (chip->cl)
+	if (chip->cl) {
 		chip->cl->dt.max_cap_inc = chip->cl_max_cap_inc_normal;
+		chip->cl->dt.max_cap_uah = 0;
+	}
 
 	batt_node = of_parse_phandle(node, "qcom,battery-data", 0);
 	/* Retain legacy trees without an explicit battery-data reference. */
@@ -2258,9 +2260,12 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 	    chip->dt.replacement_capacity_learning) {
 		chip->cl->dt.max_cap_inc =
 			chip->dt.replacement_cl_max_inc;
+		chip->cl->dt.max_cap_uah =
+			(int64_t)chip->dt.replacement_capacity_max_mah * 1000;
 
-		pr_info("unidentified replacement battery: capacity learning enabled, max increment=%d decipct\n",
-			chip->cl->dt.max_cap_inc);
+		pr_info("unidentified replacement battery: capacity learning enabled, max increment=%d decipct, hard max=%lld uAh\n",
+			chip->cl->dt.max_cap_inc,
+			chip->cl->dt.max_cap_uah);
 	}
 
 	return 0;
