@@ -2179,10 +2179,10 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 						fg->batt_id_ohms / 1000, "j2gybm4n_4780mah");
 			} else {
 				if (chip->dt.k11a_batt_profile) {
-					pr_warn("verifty battery fail. use default profile k11a_fmt_4520mah\n");
+					pr_warn("verify battery profile failed; use conservative alioth replacement profile\n");
 					chip->replacement_profile_fallback = true;
 					profile_node = of_batterydata_get_best_profile(batt_node,
-						fg->batt_id_ohms / 1000, "K11A_FMT_4520mah");
+						fg->batt_id_ohms / 1000, "K11A_REPLACEMENT_SAFE");
 				} else if (chip->dt.j3s_batt_profile) {
 					pr_warn("verifty battery fail. use default profile j3ssun_5000mah\n");
 					profile_node = of_batterydata_get_best_profile(batt_node,
