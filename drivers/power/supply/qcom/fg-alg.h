@@ -25,6 +25,8 @@ struct cycle_counter {
 	bool		started[BUCKET_COUNT];
 	u16		count[BUCKET_COUNT];
 	u8		last_soc[BUCKET_COUNT];
+	bool		initialized;
+	int		last_error;
 	int		id;
 	int		last_bucket;
 	struct mutex	lock;
