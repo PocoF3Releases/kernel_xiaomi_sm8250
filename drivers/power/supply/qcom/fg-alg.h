@@ -60,6 +60,9 @@ struct cap_learning {
 	int64_t			learned_cap_uah;
 	int64_t			delta_cap_uah;
 	bool			active;
+	bool			initialized;
+	unsigned int		successful_updates;
+	int			last_error;
 	struct mutex		lock;
 	struct cl_params	dt;
 	bool (*ok_to_begin)(void *data);
