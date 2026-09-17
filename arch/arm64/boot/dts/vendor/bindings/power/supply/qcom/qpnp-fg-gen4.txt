@@ -286,36 +286,36 @@ First Level Node - FG Gen4 device
 		    cycle. If this is not specified, then the default value
 		    used will be 5 (0.5%). Unit is in decipercentage.
 
-- qcom,replacement-capacity-learning
-Usage: optional
-Value type: <empty>
-Definition: Enables learned-capacity reporting for unidentified replacement
-            batteries using the device fallback fuel-gauge profile. This
-            property does not alter battery profile selection, charging
-            voltage, charging current, or JEITA configuration.
+- qcom,replacement-battery-type
+	Usage:      optional
+	Value type: <string>
+	Definition: Exact qcom,battery-type in the battery-data node to use when
+		    K11A vendor identification exhausts its retries. If absent,
+		    retain the legacy FMT fallback. A missing named profile is an
+		    error; do not silently select another pack by resistance.
 
-- qcom,replacement-capacity-high-threshold-mah
-Usage: optional
-Value type: <u32>
-Definition: Minimum learned full-charge capacity in mAh required before an
-            unidentified replacement battery is reported using learned
-            capacity instead of the fallback profile nominal capacity.
-            Default value is 4850 mAh.
+- qcom,replacement-capacity-learning
+	Usage:      optional
+	Value type: <empty>
+	Definition: Use replacement learning limits only after selecting the
+		    configured replacement-battery-type fallback. Without that
+		    property retain normal learning. CHARGE_FULL is learned;
+		    CHARGE_FULL_DESIGN stays nominal. Capacity estimates never
+		    choose a battery type or authorize higher charging limits.
 
 - qcom,replacement-capacity-max-mah
-Usage: optional
-Value type: <u32>
-Definition: Absolute maximum learned replacement-battery capacity in mAh.
-            Capacity learning and restored persistent learned values are
-            clamped to this threshold. It also bounds learned capacity used
-            for design-capacity reporting. Default value is 5300 mAh.
+	Usage:      optional
+	Value type: <u32>
+	Definition: Absolute learned-capacity bound for the replacement path,
+		    in mAh, including restored values. Range: 1 to 32767.
+		    Default: 5300. This is a bound, not a capacity target.
 
 - qcom,replacement-cl-max-increment
-Usage: optional
-Value type: <u32>
-Definition: Maximum upward capacity-learning correction used for an
-            unidentified replacement battery, in decipercentage per
-            qualified learning cycle. Default value is 20 (2.0%).
+	Usage:      optional
+	Value type: <u32>
+	Definition: Maximum upward correction per qualified learning update,
+		    in decipercent, for the replacement path. Range: 0 to 1000.
+		    Default: 20 (2.0%). Known profiles retain normal learning.
 
 - qcom,cl-max-decrement
 	Usage:      optional

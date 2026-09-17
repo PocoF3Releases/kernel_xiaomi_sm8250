@@ -619,10 +619,10 @@ And public attribution of xiaomi platforms(like alioth and so and)
 	/*
 	 * Unidentified replacement batteries share alioth's ~100 kOhm
 	 * battery ID.  Keep conservative profile/charging limits while
-	 * allowing the fuel gauge to learn larger real capacities.
+	 * allowing bounded estimates of usable full-charge capacity.
 	 */
 	qcom,replacement-capacity-learning;
-	qcom,replacement-capacity-high-threshold-mah = <4850>;
+	qcom,replacement-battery-type = "K11A_REPLACEMENT_SAFE";
 	qcom,replacement-capacity-max-mah = <5300>;
 	qcom,replacement-cl-max-increment = <20>;
 	qcom,soc_decimal_rate = <
