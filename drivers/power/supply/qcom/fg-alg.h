@@ -41,6 +41,7 @@ struct cl_params {
 	int	max_cap_dec;
 	int	max_cap_limit;
 	int	min_cap_limit;
+	int64_t	max_cap_uah;
 	int	skew_decipct;
 	int	min_delta_batt_soc;
 	int	ibat_flt_thr_ma;

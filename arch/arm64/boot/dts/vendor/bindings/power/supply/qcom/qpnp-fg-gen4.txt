@@ -305,9 +305,10 @@ Definition: Minimum learned full-charge capacity in mAh required before an
 - qcom,replacement-capacity-max-mah
 Usage: optional
 Value type: <u32>
-Definition: Maximum plausible learned replacement-battery capacity in mAh.
-            Learned values above this threshold are ignored for design
-            capacity reporting. Default value is 5300 mAh.
+Definition: Absolute maximum learned replacement-battery capacity in mAh.
+            Capacity learning and restored persistent learned values are
+            clamped to this threshold. It also bounds learned capacity used
+            for design-capacity reporting. Default value is 5300 mAh.
 
 - qcom,replacement-cl-max-increment
 Usage: optional
