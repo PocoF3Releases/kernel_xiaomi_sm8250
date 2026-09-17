@@ -228,7 +228,7 @@ struct fg_dt_props {
 	bool	shutdown_delay_enable;
 	bool	cutoff_voltage_adjust_enable;
 	bool	replacement_capacity_learning;
-	int	replacement_capacity_high_mah;
+	const char *replacement_battery_type;
 	int	replacement_capacity_max_mah;
 	int	replacement_cl_max_inc;
 	int	*dec_rate_seq;
@@ -1397,7 +1397,6 @@ static int fg_gen4_store_learned_capacity(void *data, int64_t learned_cap_uah)
 	struct fg_dev *fg;
 	int16_t cc_mah;
 	int rc;
-	u32 cookie_4byte = SDAM_COOKIE_4BYTE;
 
 	if (!chip)
 		return -ENODEV;
@@ -1405,6 +1404,11 @@ static int fg_gen4_store_learned_capacity(void *data, int64_t learned_cap_uah)
 	fg = &chip->fg;
 	if (fg->battery_missing || !learned_cap_uah)
 		return -EPERM;
+
+	if (learned_cap_uah < 1000 || learned_cap_uah > 32767000 ||
+	    (chip->cl->dt.max_cap_uah > 0 &&
+	     learned_cap_uah > chip->cl->dt.max_cap_uah))
+		return -ERANGE;
 
 	cc_mah = div64_s64(learned_cap_uah, 1000);
 	rc = fg_sram_write(fg, fg->sp[FG_SRAM_ACT_BATT_CAP].addr_word,
@@ -1424,16 +1428,11 @@ static int fg_gen4_store_learned_capacity(void *data, int64_t learned_cap_uah)
 			return rc;
 		}
 
-		rc = nvmem_device_write(chip->fg_nvmem,
-			SDAM_COOKIE_OFFSET_4BYTE, 1, &cookie_4byte);
-		if (rc < 0) {
-			pr_err("Error in writing cookie to SDAM, rc=%d\n", rc);
-			return rc;
-		}
+		/* The full post-profile migration owns the SDAM cookie. */
 	}
 
 	fg_dbg(fg, FG_CAP_LEARN, "learned capacity %llduah/%dmah stored\n",
-		chip->cl->learned_cap_uah, cc_mah);
+		learned_cap_uah, cc_mah);
 	return 0;
 }
 
@@ -2086,18 +2085,10 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 	struct fg_gen4_chip *chip = container_of(fg, struct fg_gen4_chip, fg);
 	struct device_node *node = fg->dev->of_node;
 	struct device_node *batt_node, *profile_node;
-	const char *data;
+	const char *data, *fallback_type;
+	bool replacement_fallback = false;
 	int rc, len, avail_age_level = 0;
 
-	/*
-	 * Start every lookup as a normal/known battery.  Only the final
-	 * unidentified K11A fallback below marks the pack as a replacement.
-	 */
-	chip->replacement_profile_fallback = false;
-	if (chip->cl) {
-		chip->cl->dt.max_cap_inc = chip->cl_max_cap_inc_normal;
-		chip->cl->dt.max_cap_uah = 0;
-	}
 
 	batt_node = of_parse_phandle(node, "qcom,battery-data", 0);
 	/* Retain legacy trees without an explicit battery-data reference. */
@@ -2179,10 +2170,14 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 						fg->batt_id_ohms / 1000, "j2gybm4n_4780mah");
 			} else {
 				if (chip->dt.k11a_batt_profile) {
-					pr_warn("verify battery profile failed; use conservative alioth replacement profile\n");
-					chip->replacement_profile_fallback = true;
+					fallback_type = chip->dt.replacement_battery_type;
+					replacement_fallback = !!fallback_type;
+					if (!fallback_type)
+						fallback_type = "K11A_FMT_4520mah";
+					pr_warn("battery profile unidentified; using %s\n",
+						fallback_type);
 					profile_node = of_batterydata_get_best_profile(batt_node,
-						fg->batt_id_ohms / 1000, "K11A_REPLACEMENT_SAFE");
+						fg->batt_id_ohms / 1000, fallback_type);
 				} else if (chip->dt.j3s_batt_profile) {
 					pr_warn("verifty battery fail. use default profile j3ssun_5000mah\n");
 					profile_node = of_batterydata_get_best_profile(batt_node,
@@ -2256,16 +2251,21 @@ static int fg_gen4_get_batt_profile(struct fg_dev *fg)
 	if (rc < 0)
 		return rc;
 
-	if (chip->cl && chip->replacement_profile_fallback &&
-	    chip->dt.replacement_capacity_learning) {
-		chip->cl->dt.max_cap_inc =
-			chip->dt.replacement_cl_max_inc;
-		chip->cl->dt.max_cap_uah =
-			(int64_t)chip->dt.replacement_capacity_max_mah * 1000;
-
-		pr_info("unidentified replacement battery: capacity learning enabled, max increment=%d decipct, hard max=%lld uAh\n",
-			chip->cl->dt.max_cap_inc,
-			chip->cl->dt.max_cap_uah);
+	if (chip->cl) {
+		mutex_lock(&chip->cl->lock);
+		/* Publish the policy only after a profile was successfully parsed. */
+		chip->replacement_profile_fallback = replacement_fallback;
+		chip->cl->active = false;
+		chip->cl->initialized = false;
+		chip->cl->init_cap_uah = 0;
+		chip->cl->dt.max_cap_inc = chip->cl_max_cap_inc_normal;
+		chip->cl->dt.max_cap_uah = 0;
+		if (replacement_fallback && chip->dt.replacement_capacity_learning) {
+			chip->cl->dt.max_cap_inc = chip->dt.replacement_cl_max_inc;
+			chip->cl->dt.max_cap_uah =
+				(int64_t)chip->dt.replacement_capacity_max_mah * 1000;
+		}
+		mutex_unlock(&chip->cl->lock);
 	}
 
 	return 0;
@@ -4996,7 +4996,34 @@ static ssize_t esr_fast_cal_en_show(struct device *dev, struct device_attribute
 }
 static DEVICE_ATTR_RW(esr_fast_cal_en);
 
+
+/* Read-only diagnostics; restored capacity is not a newly measured sample. */
+static ssize_t capacity_learning_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct fg_gen4_chip *chip = dev_get_drvdata(dev);
+	struct cap_learning *cl;
+	ssize_t len;
+
+	if (!chip || !chip->cl)
+		return -ENODEV;
+	cl = chip->cl;
+	mutex_lock(&cl->lock);
+	len = scnprintf(buf, PAGE_SIZE,
+		"initialized=%d\nactive=%d\nreplacement_fallback=%d\n"
+		"successful_updates=%u\nlast_error=%d\n"
+		"nominal_uah=%lld\nlearned_uah=%lld\n"
+		"maximum_uah=%lld\nmax_increment_decipct=%d\n",
+		cl->initialized, cl->active, chip->replacement_profile_fallback,
+		cl->successful_updates, cl->last_error, cl->nom_cap_uah,
+		cl->learned_cap_uah, cl->dt.max_cap_uah, cl->dt.max_cap_inc);
+	mutex_unlock(&cl->lock);
+	return len;
+}
+static DEVICE_ATTR_RO(capacity_learning);
+
 static struct attribute *fg_attrs[] = {
+	&dev_attr_capacity_learning.attr,
 	&dev_attr_profile_dump.attr,
 	&dev_attr_sram_dump_period_ms.attr,
 	&dev_attr_sram_dump_en.attr,
@@ -5310,40 +5337,7 @@ static int fg_psy_get_property(struct power_supply *psy,
 		if (!rc)
 			pval->intval = (int)temp;
 		break;
-	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN: {
-		int64_t learned_cap_uah = 0;
-
-		/*
-		 * For an unidentified replacement pack, retain the conservative
-		 * FMT charging profile but expose a learned high-capacity value
-		 * once Qualcomm capacity learning has moved convincingly above
-		 * the stock 4520 mAh range.
-		 *
-		 * Reporting only: never change BATTERY_TYPE, FV, FCC or JEITA.
-		 */
-		if (chip->dt.replacement_capacity_learning &&
-		    chip->replacement_profile_fallback) {
-			rc = fg_gen4_get_learned_capacity(chip,
-							  &learned_cap_uah);
-
-			if (!rc &&
-			    learned_cap_uah >=
-				(int64_t)chip->dt.replacement_capacity_high_mah *
-					1000 &&
-			    learned_cap_uah <=
-				(int64_t)chip->dt.replacement_capacity_max_mah *
-					1000) {
-				pval->intval = (int)learned_cap_uah;
-				break;
-			}
-
-			/*
-			 * Failure to read learned capacity must not break the normal
-			 * fallback design-capacity property.
-			 */
-			rc = 0;
-		}
-
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 		if (-EINVAL != fg->bp.nom_cap_uah) {
 			pval->intval = fg->bp.nom_cap_uah * 1000;
 		} else {
@@ -5352,7 +5346,6 @@ static int fg_psy_get_property(struct power_supply *psy,
 				pval->intval = (int)temp;
 		}
 		break;
-	}
 	case POWER_SUPPLY_PROP_CHARGE_COUNTER:
 		rc = fg_gen4_get_charge_counter(chip, &pval->intval);
 		break;
@@ -5468,18 +5461,23 @@ static int fg_psy_set_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		if (chip->cl->active) {
-			pr_warn("Capacity learning active!\n");
-			return 0;
-		}
-		if (pval->intval <= 0 || pval->intval > chip->cl->nom_cap_uah) {
-			pr_err("charge_full is out of bounds\n");
-			return -EINVAL;
-		}
 		mutex_lock(&chip->cl->lock);
-		rc = fg_gen4_store_learned_capacity(chip, pval->intval);
-		if (!rc)
-			chip->cl->learned_cap_uah = pval->intval;
+		if (!chip->cl->initialized || chip->cl->active) {
+			rc = -EBUSY;
+		} else if (pval->intval <= 0 ||
+			   pval->intval > chip->cl->nom_cap_uah) {
+			rc = -EINVAL;
+		} else {
+			rc = fg_gen4_store_learned_capacity(chip, pval->intval);
+			if (!rc) {
+				chip->cl->learned_cap_uah = pval->intval;
+				/* A manual write is not a measured learning update. */
+				chip->cl->successful_updates = 0;
+			} else {
+				chip->cl->initialized = false;
+			}
+		}
+		chip->cl->last_error = rc;
 		mutex_unlock(&chip->cl->lock);
 		break;
 	case POWER_SUPPLY_PROP_CC_STEP:
@@ -6701,7 +6699,6 @@ static int fg_gen4_parse_nvmem_dt(struct fg_gen4_chip *chip)
  *
  * These values affect capacity learning/reporting only.
  */
-#define DEFAULT_REPL_CAP_HIGH_MAH	4850
 #define DEFAULT_REPL_CAP_MAX_MAH	5300
 #define DEFAULT_REPL_CL_MAX_INC_DECIPERC	20
 
@@ -6710,11 +6707,12 @@ static int fg_gen4_parse_nvmem_dt(struct fg_gen4_chip *chip)
 #define DEFAULT_CL_MAX_LIM_DECIPERC	0
 #define DEFAULT_CL_DELTA_BATT_SOC	10
 
-static void fg_gen4_parse_cl_params_dt(struct fg_gen4_chip *chip)
+static int fg_gen4_parse_cl_params_dt(struct fg_gen4_chip *chip)
 {
 	struct fg_dev *fg = &chip->fg;
 	struct device_node *node = fg->dev->of_node;
 	u32 temp;
+	int rc;
 
 	chip->cl->dt.max_start_soc = DEFAULT_CL_START_SOC;
 	of_property_read_u32(node, "qcom,cl-start-capacity",
@@ -6746,38 +6744,34 @@ static void fg_gen4_parse_cl_params_dt(struct fg_gen4_chip *chip)
 		of_property_read_bool(node,
 			"qcom,replacement-capacity-learning");
 
-	chip->dt.replacement_capacity_high_mah =
-		DEFAULT_REPL_CAP_HIGH_MAH;
-	if (!of_property_read_u32(node,
-			"qcom,replacement-capacity-high-threshold-mah", &temp))
-		chip->dt.replacement_capacity_high_mah = temp;
+	if (of_find_property(node, "qcom,replacement-battery-type", NULL)) {
+		rc = of_property_read_string(node, "qcom,replacement-battery-type",
+					  &chip->dt.replacement_battery_type);
+		if (rc < 0 || !chip->dt.replacement_battery_type[0])
+			return -EINVAL;
+	}
 
-	chip->dt.replacement_capacity_max_mah =
-		DEFAULT_REPL_CAP_MAX_MAH;
-	if (!of_property_read_u32(node,
-			"qcom,replacement-capacity-max-mah", &temp))
-		chip->dt.replacement_capacity_max_mah = temp;
-
-	chip->dt.replacement_cl_max_inc =
-		DEFAULT_REPL_CL_MAX_INC_DECIPERC;
-	if (!of_property_read_u32(node,
-			"qcom,replacement-cl-max-increment", &temp))
-		chip->dt.replacement_cl_max_inc = temp;
-
-	/*
-	 * Never make replacement-pack learning more restrictive than the
-	 * normal device configuration.
-	 */
-	if (chip->dt.replacement_cl_max_inc <
-			chip->cl_max_cap_inc_normal)
-		chip->dt.replacement_cl_max_inc =
-			chip->cl_max_cap_inc_normal;
-
-	if (chip->dt.replacement_capacity_high_mah <= 0 ||
-	    chip->dt.replacement_capacity_max_mah <=
-			chip->dt.replacement_capacity_high_mah) {
-		pr_warn("invalid replacement capacity thresholds; disabling replacement capacity learning\n");
+	/* Old DTs retain their legacy fallback and normal learning policy. */
+	if (!chip->dt.replacement_battery_type)
 		chip->dt.replacement_capacity_learning = false;
+
+	chip->dt.replacement_capacity_max_mah = DEFAULT_REPL_CAP_MAX_MAH;
+	chip->dt.replacement_cl_max_inc = DEFAULT_REPL_CL_MAX_INC_DECIPERC;
+	if (chip->dt.replacement_capacity_learning) {
+		if (of_find_property(node, "qcom,replacement-capacity-max-mah", NULL)) {
+			rc = of_property_read_u32(node,
+				"qcom,replacement-capacity-max-mah", &temp);
+			if (rc < 0 || !temp || temp > 32767)
+				return -EINVAL;
+			chip->dt.replacement_capacity_max_mah = temp;
+		}
+		if (of_find_property(node, "qcom,replacement-cl-max-increment", NULL)) {
+			rc = of_property_read_u32(node,
+				"qcom,replacement-cl-max-increment", &temp);
+			if (rc < 0 || temp > 1000)
+				return -EINVAL;
+			chip->dt.replacement_cl_max_inc = temp;
+		}
 	}
 
 	chip->cl->dt.max_cap_dec = DEFAULT_CL_MAX_DEC_DECIPERC;
@@ -6803,6 +6797,8 @@ static void fg_gen4_parse_cl_params_dt(struct fg_gen4_chip *chip)
 	chip->cl->dt.ibat_flt_thr_ma = 100;
 	of_property_read_u32(node, "qcom,cl-ibat-flt-thresh-ma",
 		&chip->cl->dt.ibat_flt_thr_ma);
+
+	return 0;
 }
 
 static int fg_gen4_parse_revid_dt(struct fg_gen4_chip *chip)
@@ -7055,7 +7051,9 @@ static int fg_gen4_parse_dt(struct fg_gen4_chip *chip)
 	chip->dt.cutoff_voltage_adjust_enable = of_property_read_bool(node,
 					"qcom,cutoff-voltage-adjust-enable");
 
-	fg_gen4_parse_cl_params_dt(chip);
+	rc = fg_gen4_parse_cl_params_dt(chip);
+	if (rc < 0)
+		return rc;
 	fg_gen4_parse_batt_temp_dt(chip);
 
 	chip->dt.hold_soc_while_full = of_property_read_bool(node,
