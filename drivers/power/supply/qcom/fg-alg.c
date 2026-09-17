@@ -304,76 +304,88 @@ int cycle_count_init(struct cycle_counter *counter)
  * or default parameters for the capacity learning algorithm.
  *
  */
-static void cap_learning_post_process(struct cap_learning *cl)
+/* Validate before multiplying capacities by decipercentage factors. */
+static int cap_learning_capacity_limits(struct cap_learning *cl,
+				       int64_t *lower, int64_t *upper)
 {
-	int64_t max_inc_val, min_dec_val, old_cap;
+	int64_t relative_max;
+
+	if (cl->nom_cap_uah <= 0 || cl->nom_cap_uah > INT_MAX ||
+	    cl->dt.max_cap_inc < 0 || cl->dt.max_cap_inc > 1000 ||
+	    cl->dt.max_cap_dec < 0 || cl->dt.max_cap_dec > 1000 ||
+	    cl->dt.max_cap_limit < 0 || cl->dt.max_cap_limit > 1000 ||
+	    cl->dt.min_cap_limit < 0 || cl->dt.min_cap_limit >= 1000 ||
+	    cl->dt.skew_decipct <= -1000 || cl->dt.skew_decipct > 1000 ||
+	    cl->dt.max_cap_uah < 0 || cl->dt.max_cap_uah > INT_MAX)
+		return -EINVAL;
+
+	*lower = 1;
+	*upper = INT_MAX;
+	if (cl->dt.min_cap_limit)
+		*lower = div64_s64(cl->nom_cap_uah *
+				(1000 - cl->dt.min_cap_limit), 1000);
+	if (cl->dt.max_cap_limit) {
+		relative_max = div64_s64(cl->nom_cap_uah *
+				(1000 + cl->dt.max_cap_limit), 1000);
+		if (*upper > relative_max)
+			*upper = relative_max;
+	}
+	if (cl->dt.max_cap_uah > 0 && *upper > cl->dt.max_cap_uah)
+		*upper = cl->dt.max_cap_uah;
+
+	return *lower > 0 && *lower <= *upper ? 0 : -EINVAL;
+}
+
+
+static int cap_learning_post_process(struct cap_learning *cl)
+{
+	int64_t candidate, old_cap, lower, upper, step_lower, step_upper;
 	int rc;
 
-	if (cl->dt.skew_decipct) {
-		pr_debug("applying skew %d on current learnt capacity %lld\n",
-			cl->dt.skew_decipct, cl->final_cap_uah);
-		cl->final_cap_uah = cl->final_cap_uah *
-					(1000 + cl->dt.skew_decipct);
-		cl->final_cap_uah = div64_u64(cl->final_cap_uah, 1000);
+	rc = cap_learning_capacity_limits(cl, &lower, &upper);
+	if (rc < 0)
+		goto out;
+	if (!cl->store_learned_capacity || cl->learned_cap_uah <= 0 ||
+	    cl->learned_cap_uah > INT_MAX || cl->final_cap_uah <= 0 ||
+	    cl->final_cap_uah > INT_MAX) {
+		rc = -ERANGE;
+		goto out;
 	}
-
-	max_inc_val = cl->learned_cap_uah * (1000 + cl->dt.max_cap_inc);
-	max_inc_val = div64_u64(max_inc_val, 1000);
-
-	min_dec_val = cl->learned_cap_uah * (1000 - cl->dt.max_cap_dec);
-	min_dec_val = div64_u64(min_dec_val, 1000);
 
 	old_cap = cl->learned_cap_uah;
-	if (cl->final_cap_uah > max_inc_val)
-		cl->learned_cap_uah = max_inc_val;
-	else if (cl->final_cap_uah < min_dec_val)
-		cl->learned_cap_uah = min_dec_val;
-	else
-		cl->learned_cap_uah = cl->final_cap_uah;
+	candidate = div64_s64(cl->final_cap_uah *
+				(1000 + cl->dt.skew_decipct), 1000);
+	step_lower = div64_s64(old_cap * (1000 - cl->dt.max_cap_dec), 1000);
+	step_upper = div64_s64(old_cap * (1000 + cl->dt.max_cap_inc), 1000);
+	if (candidate < step_lower)
+		candidate = step_lower;
+	if (candidate > step_upper)
+		candidate = step_upper;
 
-	if (cl->dt.max_cap_limit) {
-		max_inc_val = (int64_t)cl->nom_cap_uah * (1000 +
-				cl->dt.max_cap_limit);
-		max_inc_val = div64_u64(max_inc_val, 1000);
-		if (cl->final_cap_uah > max_inc_val) {
-			pr_debug("learning capacity %lld goes above max limit %lld\n",
-				cl->final_cap_uah, max_inc_val);
-			cl->learned_cap_uah = max_inc_val;
-		}
+	/* Bound the accepted candidate, not the unfiltered measurement. */
+	if (candidate < lower)
+		candidate = lower;
+	if (candidate > upper)
+		candidate = upper;
+
+	/* SRAM/SDAM writes are not atomic; a failure is not a learned update. */
+	rc = cl->store_learned_capacity(cl->data, candidate);
+	if (rc < 0) {
+		/* Reinitialize before using counters backed by partially written data. */
+		cl->initialized = false;
+		pr_err("Error in storing learned capacity, rc=%d\n", rc);
+		goto out;
 	}
 
-	if (cl->dt.min_cap_limit) {
-		min_dec_val = (int64_t)cl->nom_cap_uah * (1000 -
-				cl->dt.min_cap_limit);
-		min_dec_val = div64_u64(min_dec_val, 1000);
-		if (cl->final_cap_uah < min_dec_val) {
-			pr_debug("learning capacity %lld goes below min limit %lld\n",
-				cl->final_cap_uah, min_dec_val);
-			cl->learned_cap_uah = min_dec_val;
-		}
-	}
-
-	/*
-	 * Optional absolute learned-capacity ceiling.  Unlike max_cap_limit,
-	 * which is relative to nominal capacity, this is expressed directly
-	 * in uAh and is useful when the physical replacement-pack range is
-	 * known.
-	 */
-	if (cl->dt.max_cap_uah > 0 &&
-	    cl->learned_cap_uah > cl->dt.max_cap_uah) {
-		pr_debug("learned capacity %lld exceeds absolute max %lld uAh\n",
-			cl->learned_cap_uah, cl->dt.max_cap_uah);
-		cl->learned_cap_uah = cl->dt.max_cap_uah;
-	}
-
-	if (cl->store_learned_capacity) {
-		rc = cl->store_learned_capacity(cl->data, cl->learned_cap_uah);
-		if (rc < 0)
-			pr_err("Error in storing learned_cap_uah, rc=%d\n", rc);
-	}
-
+	cl->learned_cap_uah = candidate;
+	if (cl->successful_updates < UINT_MAX)
+		cl->successful_updates++;
 	pr_debug("final cap_uah = %lld, learned capacity %lld -> %lld uah\n",
 		cl->final_cap_uah, old_cap, cl->learned_cap_uah);
+	rc = 0;
+out:
+	cl->last_error = rc;
+	return rc;
 }
 
 /**
@@ -570,8 +582,9 @@ static int cap_learning_done(struct cap_learning *cl, int batt_soc_cp)
 		}
 	}
 
-	cap_learning_post_process(cl);
+	rc = cap_learning_post_process(cl);
 out:
+	cl->last_error = rc;
 	return rc;
 }
 
@@ -625,7 +638,8 @@ void cap_learning_update(struct cap_learning *cl, int batt_temp,
 
 	mutex_lock(&cl->lock);
 
-	if (batt_temp > cl->dt.max_temp || batt_temp < cl->dt.min_temp ||
+	if (!cl->initialized || batt_temp > cl->dt.max_temp ||
+	    batt_temp < cl->dt.min_temp ||
 		!cl->learned_cap_uah) {
 		cl->active = false;
 		cl->init_cap_uah = 0;
@@ -742,56 +756,56 @@ void cap_learning_abort(struct cap_learning *cl)
  */
 int cap_learning_post_profile_init(struct cap_learning *cl, int64_t nom_cap_uah)
 {
-	int64_t delta_cap_uah, pct_nom_cap_uah;
+	int64_t restored, candidate, delta, lower, upper;
 	int rc;
 
-	if (!cl || !cl->data)
+	if (!cl || !cl->data || !cl->get_learned_capacity ||
+	    !cl->store_learned_capacity)
 		return -EINVAL;
 
 	mutex_lock(&cl->lock);
+	cl->initialized = false;
+	cl->active = false;
+	cl->init_cap_uah = 0;
+	cl->successful_updates = 0;
 	cl->nom_cap_uah = nom_cap_uah;
-	rc = cl->get_learned_capacity(cl->data, &cl->learned_cap_uah);
-	if (rc < 0) {
-		pr_err("Couldn't get learned capacity, rc=%d\n", rc);
+	rc = cap_learning_capacity_limits(cl, &lower, &upper);
+	if (rc < 0)
 		goto out;
+
+	rc = cl->get_learned_capacity(cl->data, &restored);
+	if (rc < 0)
+		goto out;
+
+	candidate = restored;
+	if (candidate <= 0 || candidate > INT_MAX) {
+		candidate = nom_cap_uah;
+	} else {
+		delta = candidate > nom_cap_uah ? candidate - nom_cap_uah :
+						 nom_cap_uah - candidate;
+		if (delta > div64_s64(nom_cap_uah * CAPACITY_DELTA_DECIPCT,
+				     1000))
+			candidate = nom_cap_uah;
 	}
 
-	if (cl->learned_cap_uah != cl->nom_cap_uah) {
-		if (cl->learned_cap_uah == 0)
-			cl->learned_cap_uah = cl->nom_cap_uah;
+	/* Apply bounds even when the restored value equals nominal capacity. */
+	if (candidate < lower)
+		candidate = lower;
+	if (candidate > upper)
+		candidate = upper;
 
-		delta_cap_uah = abs(cl->learned_cap_uah - cl->nom_cap_uah);
-		pct_nom_cap_uah = div64_s64((int64_t)cl->nom_cap_uah *
-				CAPACITY_DELTA_DECIPCT, 1000);
-		/*
-		 * If the learned capacity is out of range by 50% from the
-		 * nominal capacity, then overwrite the learned capacity with
-		 * the nominal capacity.
-		 */
-		if (cl->nom_cap_uah && delta_cap_uah > pct_nom_cap_uah) {
-			pr_debug("learned_cap_uah: %lld is higher than expected, capping it to nominal: %lld\n",
-				cl->learned_cap_uah, cl->nom_cap_uah);
-			cl->learned_cap_uah = cl->nom_cap_uah;
-		}
-
-		/*
-		 * Apply the absolute ceiling to values restored from persistent
-		 * storage too, so a stale value from an earlier battery cannot
-		 * remain above the configured replacement-pack limit.
-		 */
-		if (cl->dt.max_cap_uah > 0 &&
-		    cl->learned_cap_uah > cl->dt.max_cap_uah) {
-			pr_debug("restored learned capacity %lld exceeds absolute max %lld uAh\n",
-				cl->learned_cap_uah, cl->dt.max_cap_uah);
-			cl->learned_cap_uah = cl->dt.max_cap_uah;
-		}
-
-		rc = cl->store_learned_capacity(cl->data, cl->learned_cap_uah);
+	/* Preserve the existing SDAM-to-SRAM synchronization of aged capacity. */
+	if (restored != nom_cap_uah || candidate != restored) {
+		rc = cl->store_learned_capacity(cl->data, candidate);
 		if (rc < 0)
-			pr_err("Error in storing learned_cap_uah, rc=%d\n", rc);
+			goto out;
 	}
 
+	cl->learned_cap_uah = candidate;
+	cl->initialized = true;
+	rc = 0;
 out:
+	cl->last_error = rc;
 	mutex_unlock(&cl->lock);
 	return rc;
 }
@@ -820,6 +834,9 @@ int cap_learning_init(struct cap_learning *cl)
 		return -EINVAL;
 	}
 
+	cl->initialized = false;
+	cl->successful_updates = 0;
+	cl->last_error = 0;
 	mutex_init(&cl->lock);
 	return 0;
 }
