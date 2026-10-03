@@ -2119,6 +2119,8 @@ handle_irq:
 			dev_err(swrm->dev,
 				"%s: SWR write FIFO overflow fifo status %x\n",
 				__func__, value);
+			swr_master_write(swrm, SWRM_COMP_SW_RESET, 0x01);
+			swrm_master_init(swrm);
 			break;
 		case SWRM_INTERRUPT_STATUS_CMD_ERROR:
 			value = swr_master_read(swrm, SWRM_CMD_FIFO_STATUS);
@@ -2843,11 +2845,7 @@ static int swrm_probe(struct platform_device *pdev)
 		dev_dbg(&pdev->dev, "%s: Audio HW Vote is failed\n", __func__);
 	mutex_lock(&swrm->mlock);
 	swrm_clk_request(swrm, true);
-	swrm_hw_ver = swr_master_read(swrm, SWRM_COMP_HW_VERSION);
-	if (swrm->version != swrm_hw_ver)
-		dev_info(&pdev->dev,
-			 "%s: version specified in dtsi: 0x%x not match with HW read version 0x%x\n",
-			 __func__, swrm->version, swrm_hw_ver);
+	swrm->version = swr_master_read(swrm, SWRM_COMP_HW_VERSION);
 	swrm->rd_fifo_depth = ((swr_master_read(swrm, SWRM_COMP_PARAMS)
 				& SWRM_COMP_PARAMS_RD_FIFO_DEPTH) >> 15);
 	swrm->wr_fifo_depth = ((swr_master_read(swrm, SWRM_COMP_PARAMS)
