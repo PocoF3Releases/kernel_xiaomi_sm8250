@@ -3438,7 +3438,9 @@ static void sde_encoder_virt_enable(struct drm_encoder *drm_enc)
 	/* register input handler if not already registered */
 	if (sde_enc->input_handler && !sde_enc->input_handler_registered &&
 			!msm_is_mode_seamless_dms(cur_mode) &&
+#if 0
 		sde_encoder_check_curr_mode(drm_enc, MSM_DISPLAY_CMD_MODE) &&
+#endif
 			!msm_is_mode_seamless_dyn_clk(cur_mode)) {
 		_sde_encoder_input_handler_register(drm_enc);
 		if (!sde_enc->input_handler || !sde_enc->input_handler->private)
@@ -3578,7 +3580,11 @@ static void sde_encoder_virt_disable(struct drm_encoder *drm_enc)
 		sde_encoder_wait_for_event(drm_enc, MSM_ENC_TX_COMPLETE);
 
 	if (sde_enc->input_handler && sde_enc->input_handler_registered &&
+#if 0
 		sde_encoder_check_curr_mode(drm_enc, MSM_DISPLAY_CMD_MODE)) {
+#else
+		true) {
+#endif
 		input_unregister_handler(sde_enc->input_handler);
 		sde_enc->input_handler_registered = false;
 	}

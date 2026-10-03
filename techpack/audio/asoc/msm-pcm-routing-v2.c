@@ -3506,7 +3506,7 @@ static int msm_pcm_get_out_chs(struct snd_kcontrol *kcontrol,
 static int msm_pcm_put_out_chs(struct snd_kcontrol *kcontrol,
 				struct snd_ctl_elem_value *ucontrol)
 {
-	u16 fe_id = 0, out_ch = 0;
+	u16 fe_id = 0;
 
 	fe_id = ((struct soc_multi_mixer_control *)
 			kcontrol->private_value)->shift;
@@ -25950,10 +25950,6 @@ static const struct snd_soc_dapm_widget msm_qdsp6_widgets_tdm[] = {
 				SND_SOC_NOPM, 0, 0,
 				pri_tdm_rx_3_voice_mixer_controls,
 				ARRAY_SIZE(pri_tdm_rx_3_voice_mixer_controls)),
-	SND_SOC_DAPM_MIXER("SEN_MI2S_RX_Voice Mixer",
-				SND_SOC_NOPM, 0, 0,
-				sen_mi2s_rx_voice_mixer_controls,
-				ARRAY_SIZE(sen_mi2s_rx_voice_mixer_controls)),
 	SND_SOC_DAPM_MIXER("TERT_TDM_RX_0_Voice Mixer",
 				SND_SOC_NOPM, 0, 0,
 				tert_tdm_rx_0_voice_mixer_controls,
