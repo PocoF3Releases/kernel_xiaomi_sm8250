@@ -930,8 +930,8 @@ int smblib_set_fastcharge_mode(struct smb_charger *chg, bool enable)
 	rc = power_supply_get_property(chg->bms_psy,
 				POWER_SUPPLY_PROP_TEMP, &pval);
 	if (rc < 0) {
-		smblib_err(chg, "Couldn't get bms capacity:%d\n", rc);
-		goto set_term;
+		smblib_err(chg, "Couldn't get bms temperature:%d\n", rc);
+		return rc;
 	}
 	batt_temp = pval.intval;
 	if (enable && (pval.intval >= chg->chg_warm_threshold  ||
@@ -3293,7 +3293,7 @@ static void smblib_set_wireless_present(struct smb_charger *chg, bool present)
 int smblib_get_prop_wireless_version(struct smb_charger *chg,
 				     union power_supply_propval *val)
 {
-	int rc;
+	int rc = -ENODEV;
 
 	chg->idtp_psy = power_supply_get_by_name("idt");
 	if (chg->idtp_psy) {
@@ -3315,7 +3315,7 @@ int smblib_get_prop_wireless_version(struct smb_charger *chg,
 int smblib_get_prop_wireless_fw_version(struct smb_charger *chg,
 				     union power_supply_propval *val)
 {
-	int rc;
+	int rc = -ENODEV;
 
 	chg->idtp_psy = power_supply_get_by_name("idt");
 	if (chg->idtp_psy) {
@@ -3726,8 +3726,12 @@ int smblib_night_charging_func(struct smb_charger *chg,
 	int rc = 0;
 
 	rc = smblib_get_prop_batt_capacity(chg, &pval);
+	if (rc < 0)
+		return rc;
 	capacity = pval.intval;
 	rc = smblib_get_prop_battery_input_suspend(chg, &pval);
+	if (rc < 0)
+		return rc;
 	battery_input_suspend = pval.intval;
 	if (chg->night_chg_flag) {
 		pr_info("nchg_func:capacity:%d, battery_input_suspend:%d.\n",
@@ -3739,6 +3743,8 @@ int smblib_night_charging_func(struct smb_charger *chg,
 		if (chg->night_chg_flag && capacity >= 80) {
 			pval.intval = 1;
 			rc = smblib_set_prop_battery_input_suspend(chg, &pval);
+			if (rc < 0)
+				return rc;
 			pr_err("nchg_func:opne night charging.\n");
 			pre_night_chg_flag = chg->night_chg_flag;
 		}
@@ -3747,7 +3753,9 @@ int smblib_night_charging_func(struct smb_charger *chg,
 	if (battery_input_suspend &&
 			(!chg->night_chg_flag || capacity <= 75)) {
 		pval.intval = 0;
-		smblib_set_prop_battery_input_suspend(chg, &pval);
+		rc = smblib_set_prop_battery_input_suspend(chg, &pval);
+		if (rc < 0)
+			return rc;
 		pr_err("nchg_func:close night charging.\n");
 		pre_night_chg_flag = 0;
 	}
@@ -4629,8 +4637,6 @@ static int smblib_update_thermal_readings(struct smb_charger *chg)
 int smblib_set_vbus_disable(struct smb_charger *chg,
 					bool disable)
 {
-	int ret;
-
 	smblib_err(chg, "set vbus disable:%d\n", disable);
 	if (disable) {
 		if (chg->vbus_disable_gpio) {
@@ -4643,7 +4649,7 @@ int smblib_set_vbus_disable(struct smb_charger *chg,
 	}
 	chg->vbus_disable = disable;
 
-	return ret;
+	return 0;
 }
 
 static int smblib_set_sw_conn_therm_regulation(struct smb_charger *chg,
@@ -5111,7 +5117,7 @@ int smblib_get_prop_voltage_wls_output(struct smb_charger *chg,
 	int rc;
 
 	if (chg->wireless_bq)
-		return rc;
+		return -EOPNOTSUPP;
 
 	if (!chg->wls_psy) {
 		chg->wls_psy = power_supply_get_by_name("wireless");
@@ -5245,7 +5251,7 @@ int smblib_get_prop_dc_voltage_now(struct smb_charger *chg,
 	int rc;
 
 	if (chg->wireless_bq)
-		return rc;
+		return -EOPNOTSUPP;
 
 	if (!chg->wls_psy) {
 		chg->wls_psy = power_supply_get_by_name("wireless");
@@ -5286,7 +5292,7 @@ int smblib_set_prop_voltage_wls_output(struct smb_charger *chg,
 	int rc;
 
 	if (chg->wireless_bq)
-		return rc;
+		return -EOPNOTSUPP;
 
 	if (!chg->wls_psy) {
 		chg->wls_psy = power_supply_get_by_name("wireless");
@@ -5324,7 +5330,7 @@ int smblib_set_prop_dc_reset(struct smb_charger *chg)
 	int rc;
 
 	if (chg->wireless_bq)
-		return rc;
+		return -EOPNOTSUPP;
 
 	rc = vote(chg->dc_suspend_votable, VOUT_VOTER, true, 0);
 	if (rc < 0) {
@@ -5612,10 +5618,12 @@ int smblib_get_usb_online(struct smb_charger *chg,
 
 	if (chg->report_input_absent) {
 		val->intval = 0;
-		return rc;
+		return 0;
 	}
 
 	rc = smblib_get_prop_usb_online(chg, val);
+	if (rc < 0)
+		return rc;
 	if (!val->intval)
 		goto exit;
 
@@ -8051,9 +8059,10 @@ static int check_reduce_fcc_condition(struct smb_charger *chg)
 
 	if (!chg->cp_psy) {
 		chg->cp_psy = power_supply_get_by_name("bq2597x-standalone");
-		if (!chg->cp_psy)
+		if (!chg->cp_psy) {
 			pr_err("cp_psy not found\n");
 			return 0;
+		}
 	}
 
 	rc = power_supply_get_property(chg->cp_psy,
@@ -8861,7 +8870,7 @@ int smblib_get_quick_charge_type(struct smb_charger *chg)
 	union power_supply_propval pval = {0, };
 
 	if (!chg) {
-		dev_err(chg->dev, "get quick charge type faied\n");
+		pr_err("get quick charge type failed: no charger\n");
 		return -EINVAL;
 	}
 
