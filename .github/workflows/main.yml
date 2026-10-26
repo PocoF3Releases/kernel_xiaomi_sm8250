@@ -1,0 +1,74 @@
+
+name: Build Poco F3 Kernel with KernelSU-Next
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          ref: aosp-16
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential curl flex git \
+            libelf-dev libssl-dev lld llvm clang \
+            gcc-aarch64-linux-gnu make python3 \
+            rsync unzip
+
+      - name: Integrate KernelSU-Next Legacy
+        run: |
+          set -euxo pipefail
+          curl -LSs \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
+            -o /tmp/ksu-setup.sh
+          bash /tmp/ksu-setup.sh legacy
+
+      - name: Configure alioth
+        run: |
+          set -euxo pipefail
+          make O=out ARCH=arm64 LLVM=1 alioth_defconfig
+          scripts/config --file out/.config \
+            -e KSU \
+            -e KPROBES \
+            -e KPROBE_EVENTS \
+            -e KSU_KPROBE_HOOKS
+          make O=out ARCH=arm64 LLVM=1 olddefconfig
+
+          grep -E \
+            'CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=' \
+            out/.config
+
+      - name: Build kernel
+        run: |
+          set -euxo pipefail
+          make -j2 O=out ARCH=arm64 LLVM=1 Image.gz dtbs
+
+          mkdir -p artifacts
+          cp out/arch/arm64/boot/Image.gz artifacts/
+          cp out/.config artifacts/kernel.config
+
+          if [ -d out/arch/arm64/boot/dts ]; then
+            tar -czf artifacts/dtbs.tar.gz \
+              -C out/arch/arm64/boot/dts .
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: poco-f3-alioth-ksunext
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
