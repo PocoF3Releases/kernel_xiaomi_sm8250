@@ -233,7 +233,7 @@ static int qc3_set_bms_fastcharge_mode(bool enable)
 /* get thermal level from battery power supply property */
 static int qc3_get_batt_current_thermal_level(int *level)
 {
-	int ret, rc;
+	int rc;
 	struct power_supply *psy;
 	union power_supply_propval val = {
 		0,
@@ -243,11 +243,11 @@ static int qc3_get_batt_current_thermal_level(int *level)
 	if (!psy)
 		return 0;
 
-	ret = power_supply_get_property(
+	rc = power_supply_get_property(
 		psy, POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT, &val);
 
 	if (rc < 0) {
-		pr_info("Couldn't get fastcharge mode:%d\n", rc);
+		pr_info("Couldn't get thermal level:%d\n", rc);
 		return rc;
 	}
 
@@ -663,7 +663,7 @@ static int cp_get_qc_pulse_cnt(void)
 
 static int cp_reset_vbus_volt(void)
 {
-	int ret;
+	int ret = 0;
 	int qc3p5_reset_vbus_retry = 0;
 	struct power_supply *psy;
 	union power_supply_propval val = {
@@ -683,6 +683,7 @@ static int cp_reset_vbus_volt(void)
 			       qc3p5_reset_vbus_retry,
 			       pm_state.bq2597x.vbus_volt);
 			if (qc3p5_reset_vbus_retry > 300) {
+				ret = -ETIMEDOUT;
 				pr_err("Failed to reset qc3.5 adapter volt to 6.55v or less\n");
 				break;
 			}
@@ -953,7 +954,7 @@ static int cp_flash2_charge(unsigned int port)
 	return 0;
 }
 
-const unsigned char *pm_state_str[] = {
+static const unsigned char *pm_state_str[] = {
 	"CP_STATE_ENTRY",
 	"CP_STATE_DISCONNECT",
 	"CP_STATE_SW_ENTRY",
@@ -982,7 +983,7 @@ static void cp_move_state(pm_sm_state_t state)
 	pm_state.state = state;
 }
 
-void cp_statemachine(unsigned int port)
+static void cp_statemachine(unsigned int port)
 {
 	int ret;
 	static int tune_vbus_retry, tune_vbus_count, retry_enable_bq_count;
@@ -1404,7 +1405,7 @@ void cp_statemachine(unsigned int port)
 		break;
 	}
 }
-int log_count = 0;
+static int log_count;
 static void pm_state_print_log(void)
 {
 	pr_err("michglog:batt[%d-%d-%d-%d-%d-%d],bus[%d-%d-%d-%d-%d]usb[%d-%d-%d-%d-%d]ilimit[%d-%d-%d]therm[%d-%d-%d-%d-%d-%d]sys_config[%d-%d-%d-%d][%d-%d-%d-%d][%d-%d-%d-%d]\n",
