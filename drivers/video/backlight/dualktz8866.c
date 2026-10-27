@@ -91,16 +91,19 @@ static int ktz8866_writes(struct ktz8866 *bd, u8 reg, u8 data)
 
 static int pwm_to_51(int pwm)
 {
-	int i;
-	for (i = 0; i < 6; i++) {
+	size_t i;
+	for (i = 0; i < ARRAY_SIZE(pwm_map); i++) {
 		if (pwm == pwm_map[i].pwm)
 			break;
 	}
 
+	if (i == ARRAY_SIZE(pwm_map))
+		return -EINVAL;
+
 	return pwm_map[i].bl_value;
 }
 
-static int ktz8866_case1_test(int pwm, char *result)
+static int ktz8866_case1_test(int pwm, char *result, size_t result_size)
 {
 	int bl;
 	struct pwm_reg pwm_reg_a;
@@ -109,6 +112,8 @@ static int ktz8866_case1_test(int pwm, char *result)
 	u16 pwm_digital_value_b;
 
 	bl = pwm_to_51(pwm);
+	if (bl < 0)
+		return bl;
 	mi_mipi_dsi_dcs_set_pwm_value(bl);
 
 	mdelay(500);
@@ -121,14 +126,14 @@ static int ktz8866_case1_test(int pwm, char *result)
 	pwm_digital_value_a = pwm_reg_a.hbyte << 8 | pwm_reg_a.lbyte;
 	pwm_digital_value_b = pwm_reg_b.hbyte << 8 | pwm_reg_b.lbyte;
 
-	sprintf(result, "case1_%d_%d", pwm_digital_value_a,
+	scnprintf(result, result_size, "case1_%d_%d", pwm_digital_value_a,
 		pwm_digital_value_b);
 	printk("bl_selftest:  ktz8866_case1_test result: %s\n", result);
 
 	return 0;
 }
 
-static int ktz8866_case2_test(int pwm, char *result)
+static int ktz8866_case2_test(int pwm, char *result, size_t result_size)
 {
 	int bl;
 	struct pwm_reg pwm_reg_a;
@@ -140,6 +145,8 @@ static int ktz8866_case2_test(int pwm, char *result)
 	u64 diff_b;
 
 	bl = pwm_to_51(pwm);
+	if (bl < 0)
+		return bl;
 	mi_mipi_dsi_dcs_set_pwm_value(bl);
 
 	mdelay(128);
@@ -155,7 +162,7 @@ static int ktz8866_case2_test(int pwm, char *result)
 	diff_a = (u64)ktime_us_delta(time_b, time_a);
 	diff_b = (u64)ktime_us_delta(time_c, time_b);
 
-	sprintf(result, "case2_%llu_%llu", diff_a, diff_b);
+	scnprintf(result, result_size, "case2_%llu_%llu", diff_a, diff_b);
 
 	printk("bl_selftest:  ktz8866_case2_test result: %s\n", result);
 	return 0;
@@ -164,25 +171,13 @@ static int ktz8866_case2_test(int pwm, char *result)
 static ssize_t bl_selftest_read(struct file *file, char __user *buf,
 				size_t count, loff_t *pos)
 {
-	int cnt = strlen(gresult);
-
-	if (*pos != 0)
-		return 0;
-
-	if (copy_to_user(buf, gresult, cnt)) {
-		printk("Failed to copy data to user space\n");
-		return 0;
-	}
-
-	*pos += cnt;
-
-	return cnt;
+	return simple_read_from_buffer(buf, count, pos, gresult, strlen(gresult));
 }
 
 static ssize_t bl_selftest_write(struct file *file, const char __user *buf,
 				 size_t count, loff_t *pos)
 {
-	char tmp[6] = { 0 };
+	char tmp[7] = { 0 };
 	int pwm_value = 0;
 	int ret;
 
@@ -191,7 +186,7 @@ static ssize_t bl_selftest_write(struct file *file, const char __user *buf,
 
 	if (copy_from_user(tmp, buf, count)) {
 		printk("Failed to copy data from user space\n");
-		goto out;
+		return -EFAULT;
 	}
 
 	if (!strncmp(tmp, "case1", 5))
@@ -204,15 +199,16 @@ static ssize_t bl_selftest_write(struct file *file, const char __user *buf,
 			return ret;
 		switch (caseid) {
 		case 0:
-			ktz8866_case1_test(pwm_value, gresult);
+			ret = ktz8866_case1_test(pwm_value, gresult, sizeof(gresult));
 			break;
 		case 1:
-			ktz8866_case2_test(pwm_value, gresult);
+			ret = ktz8866_case2_test(pwm_value, gresult, sizeof(gresult));
 			break;
 		}
+		if (ret)
+			return ret;
 	}
 
-out:
 	return count;
 }
 
