@@ -2890,7 +2890,7 @@ QDF_STATUS wma_set_htconfig(uint8_t vdev_id, uint16_t ht_capab, int value)
  */
 static uint64_t wma_extract_ccmp_pn(uint8_t *ccmp_ptr)
 {
-	uint8_t rsvd, key, pn[6];
+	uint8_t pn[6];
 	uint64_t new_pn;
 
 	/*
@@ -2903,8 +2903,6 @@ static uint64_t wma_extract_ccmp_pn(uint8_t *ccmp_ptr)
 	/* Extract individual bytes */
 	pn[0] = (uint8_t) *ccmp_ptr;
 	pn[1] = (uint8_t) *(ccmp_ptr + 1);
-	rsvd = (uint8_t) *(ccmp_ptr + 2);
-	key = (uint8_t) *(ccmp_ptr + 3);
 	pn[2] = (uint8_t) *(ccmp_ptr + 4);
 	pn[3] = (uint8_t) *(ccmp_ptr + 5);
 	pn[4] = (uint8_t) *(ccmp_ptr + 6);
