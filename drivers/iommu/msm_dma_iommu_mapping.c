@@ -15,15 +15,15 @@
 
 /**
  * struct msm_iommu_map - represents a mapping of an ion buffer to an iommu
- * @lnode - list node to exist in the buffer's list of iommu mappings
- * @dev - Device this is mapped to. Used as key
- * @sgl - The scatterlist for this mapping
- * @nents - Number of entries in sgl
- * @dir - The direction for the map.
- * @meta - Backpointer to the meta this guy belongs to.
- * @ref - for reference counting this mapping
- * @attrs - dma mapping attributes
- * @buf_start_addr - address of start of buffer
+ * @lnode: list node to exist in the buffer's list of iommu mappings
+ * @dev: Device this is mapped to. Used as key
+ * @sgl: The scatterlist for this mapping
+ * @nents: Number of entries in sgl
+ * @dir: The direction for the map.
+ * @meta: Backpointer to the meta this guy belongs to.
+ * @ref: for reference counting this mapping
+ * @attrs: dma mapping attributes
+ * @buf_start_addr: address of start of buffer
  *
  * Represents a mapping of one dma_buf buffer to a particular device
  * and address range. There may exist other mappings of this buffer in
