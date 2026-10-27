@@ -980,6 +980,7 @@ void binder_alloc_vma_close(struct binder_alloc *alloc)
 /**
  * binder_alloc_free_page() - shrinker callback to free pages
  * @item:   item to free
+ * @lru: list-LRU sublist containing the reclaimable Binder page
  * @lock:   lock protecting the item
  * @cb_arg: callback argument
  *

@@ -219,7 +219,10 @@ err:
 }
 
 /**
- * binderfs_ctl_ioctl - handle binder device node allocation requests
+ * binder_ctl_ioctl - handle binder device node allocation requests
+ * @file: open binder-control file identifying the binderfs mount
+ * @cmd: binder-control ioctl command, currently BINDER_CTL_ADD
+ * @arg: userspace address of the binderfs_device request and result
  *
  * The request handler for the binder-control device. All requests operate on
  * the binderfs mount the binder-control device resides in:
@@ -277,6 +280,7 @@ static void binderfs_evict_inode(struct inode *inode)
 /**
  * binderfs_parse_mount_opts - parse binderfs mount options
  * @data: options to set (can be NULL in which case defaults are used)
+ * @opts: mount options initialized to defaults and updated from @data
  */
 static int binderfs_parse_mount_opts(char *data,
 				     struct binderfs_mount_opts *opts)

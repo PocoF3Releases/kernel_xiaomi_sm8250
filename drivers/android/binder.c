@@ -434,8 +434,8 @@ enum binder_deferred_state {
 
 /**
  * struct binder_priority - scheduler policy and priority
- * @sched_policy            scheduler policy
- * @prio                    [100..139] for SCHED_NORMAL, [0..99] for FIFO/RT
+ * @sched_policy:           scheduler policy
+ * @prio:                   [100..139] for SCHED_NORMAL, [0..99] for FIFO/RT
  *
  * The binder driver supports inheriting the following scheduler policies:
  * SCHED_NORMAL
@@ -462,14 +462,14 @@ struct binder_priority {
  *                        (protected by @outer_lock)
  * @waiting_threads:      threads currently waiting for proc work
  *                        (protected by @inner_lock)
- * @pid                   PID of group_leader of process
+ * @pid:                  PID of group_leader of process
  *                        (invariant after initialized)
- * @tsk                   task_struct for group_leader of process
+ * @tsk:                  task_struct for group_leader of process
  *                        (invariant after initialized)
- * @files                 files_struct for process
+ * @files:                files_struct for process
  *                        (protected by @files_lock)
- * @files_lock            mutex to protect @files
- * @cred                  struct cred associated with the `struct file`
+ * @files_lock:           mutex to protect @files
+ * @cred:                 struct cred associated with the `struct file`
  *                        in binder_open()
  *                        (invariant after initialized)
  * @deferred_work_node:   element for binder_deferred_list
@@ -494,7 +494,7 @@ struct binder_priority {
  * @freeze_wait:          waitqueue of processes waiting for all outstanding
  *                        transactions to be processed
  *                        (protected by @inner_lock)
- * @dmap                  dbitmap to manage available reference descriptors
+ * @dmap:                 dbitmap to manage available reference descriptors
  *                        (protected by @outer_lock)
  * @todo:                 list of work for this process
  *                        (protected by @inner_lock)
@@ -586,7 +586,7 @@ enum {
  *                        (invariant after initialization)
  * @looper:               bitmap of looping state
  *                        (only accessed by this thread)
- * @looper_needs_return:  looping thread needs to exit driver
+ * @looper_need_return:   looping thread needs to exit driver
  *                        (no lock needed)
  * @transaction_stack:    stack of in-progress transactions for this thread
  *                        (protected by @proc->inner_lock)
@@ -699,7 +699,7 @@ _binder_proc_lock(struct binder_proc *proc, int line)
 
 /**
  * binder_proc_unlock() - Release spinlock for given binder_proc
- * @proc:         struct binder_proc to acquire
+ * @_proc:        struct binder_proc whose outer lock is held
  *
  * Release lock acquired via binder_proc_lock()
  */
@@ -3053,8 +3053,8 @@ static int binder_proc_transaction(struct binder_transaction *t,
 /**
  * binder_get_node_refs_for_txn() - Get required refs on node for txn
  * @node:         struct binder_node for which to get refs
- * @proc:         returns @node->proc if valid
- * @error:        if no @proc then returns BR_DEAD_REPLY
+ * @procp:        output for the target process when @node->proc is valid
+ * @error:        output set to BR_DEAD_REPLY if @node->proc is NULL
  *
  * User-space normally keeps the node alive when creating a transaction
  * since it has a reference to the target. The local strong ref keeps it
@@ -3067,8 +3067,8 @@ static int binder_proc_transaction(struct binder_transaction *t,
  * the transaction. We also need a tmpref on the proc while we are
  * constructing the transaction, so we take that here as well.
  *
- * Return: The target_node with refs taken or NULL if no @node->proc is NULL.
- * Also sets @proc if valid. If the @node->proc is NULL indicating that the
+ * Return: The target node with references taken, or NULL if @node->proc is NULL.
+ * Also sets *@procp if valid. If the @node->proc is NULL indicating that the
  * target proc has died, @error is set to BR_DEAD_REPLY
  */
 static struct binder_node *binder_get_node_refs_for_txn(
