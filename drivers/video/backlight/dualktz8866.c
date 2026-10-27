@@ -184,6 +184,10 @@ static ssize_t bl_selftest_write(struct file *file, const char __user *buf,
 {
 	char tmp[6] = { 0 };
 	int pwm_value = 0;
+	int ret;
+
+	if (count >= sizeof(tmp))
+		return -EINVAL;
 
 	if (copy_from_user(tmp, buf, count)) {
 		printk("Failed to copy data from user space\n");
@@ -195,7 +199,9 @@ static ssize_t bl_selftest_write(struct file *file, const char __user *buf,
 	else if (!strncmp(tmp, "case2", 5))
 		caseid = 1;
 	else {
-		kstrtoint(tmp, 10, &pwm_value);
+		ret = kstrtoint(tmp, 10, &pwm_value);
+		if (ret)
+			return ret;
 		switch (caseid) {
 		case 0:
 			ktz8866_case1_test(pwm_value, gresult);
