@@ -9,7 +9,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#define DEBUG
 #include <linux/ctype.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
@@ -33,6 +32,7 @@
 #include <sound/initval.h>
 #include <sound/tlv.h>
 #include <linux/printk.h>
+#include <asm/unaligned.h>
 
 #include "wm_adsp.h"
 
@@ -1285,7 +1285,7 @@ static int wm_adsp2_raw_read(size_t maxbulk, struct regmap *map,
 
 static void wm_adsp2_show_fw_status(struct wm_adsp *dsp)
 {
-	u16 scratch[4];
+	__be16 scratch[4];
 	int ret;
 
 	ret = wm_adsp2_raw_read(MAXBULK, dsp->regmap,
@@ -1303,20 +1303,21 @@ static void wm_adsp2_show_fw_status(struct wm_adsp *dsp)
 
 static void wm_adsp2v2_show_fw_status(struct wm_adsp *dsp)
 {
+	__be32 raw[2];
 	u32 scratch[2];
 	int ret;
 
 	ret = wm_adsp2_raw_read(MAXBULK, dsp->regmap,
-				dsp->base + ADSP2V2_SCRATCH0_1, scratch,
-				sizeof(scratch));
+				dsp->base + ADSP2V2_SCRATCH0_1, raw,
+				sizeof(raw));
 
 	if (ret) {
 		adsp_err(dsp, "Failed to read SCRATCH regs: %d\n", ret);
 		return;
 	}
 
-	scratch[0] = be32_to_cpu(scratch[0]);
-	scratch[1] = be32_to_cpu(scratch[1]);
+	scratch[0] = be32_to_cpu(raw[0]);
+	scratch[1] = be32_to_cpu(raw[1]);
 
 	adsp_dbg(dsp, "FW SCRATCH 0:0x%x 1:0x%x 2:0x%x 3:0x%x\n",
 		 scratch[0] & 0xFFFF, scratch[0] >> 16, scratch[1] & 0xFFFF,
@@ -1325,7 +1326,7 @@ static void wm_adsp2v2_show_fw_status(struct wm_adsp *dsp)
 
 static void wm_halo_show_fw_status(struct wm_adsp *dsp)
 {
-	u32 scratch[4];
+	__be32 scratch[4];
 	int ret;
 
 	ret = wm_adsp2_raw_read(MAXBULK, dsp->regmap, dsp->base + HALO_SCRATCH1,
@@ -1391,7 +1392,7 @@ static int wm_coeff_write_acked_control(struct wm_coeff_ctl *ctl,
 					unsigned int event_id)
 {
 	struct wm_adsp *dsp = ctl->dsp;
-	u32 val = cpu_to_be32(event_id);
+	__be32 val = cpu_to_be32(event_id);
 	unsigned int reg;
 	int i, ret;
 
@@ -2108,7 +2109,7 @@ static int wm_adsp_parse_coeff(struct wm_adsp *dsp,
 		wm_coeff_parse_coeff(dsp, &data, &coeff_blk);
 
 		switch (coeff_blk.ctl_type) {
-		case SNDRV_CTL_ELEM_TYPE_BYTES:
+		case WMFW_CTL_TYPE_BYTES:
 			break;
 		case WMFW_CTL_TYPE_ACKED:
 			if (coeff_blk.flags & WMFW_CTL_FLAG_SYS)
@@ -2772,7 +2773,7 @@ static int wm_adsp1_setup_algs(struct wm_adsp *dsp)
 				len *= 4;
 				wm_adsp_create_control(
 					dsp, alg_region, 0, len, NULL, 0, 0,
-					SNDRV_CTL_ELEM_TYPE_BYTES);
+					WMFW_CTL_TYPE_BYTES);
 			} else {
 				adsp_warn(
 					dsp,
@@ -2795,7 +2796,7 @@ static int wm_adsp1_setup_algs(struct wm_adsp *dsp)
 				len *= 4;
 				wm_adsp_create_control(
 					dsp, alg_region, 0, len, NULL, 0, 0,
-					SNDRV_CTL_ELEM_TYPE_BYTES);
+					WMFW_CTL_TYPE_BYTES);
 			} else {
 				adsp_warn(
 					dsp,
@@ -2893,7 +2894,7 @@ static int wm_adsp2_setup_algs(struct wm_adsp *dsp)
 				len *= 4;
 				wm_adsp_create_control(
 					dsp, alg_region, 0, len, NULL, 0, 0,
-					SNDRV_CTL_ELEM_TYPE_BYTES);
+					WMFW_CTL_TYPE_BYTES);
 			} else {
 				adsp_warn(
 					dsp,
@@ -2916,7 +2917,7 @@ static int wm_adsp2_setup_algs(struct wm_adsp *dsp)
 				len *= 4;
 				wm_adsp_create_control(
 					dsp, alg_region, 0, len, NULL, 0, 0,
-					SNDRV_CTL_ELEM_TYPE_BYTES);
+					WMFW_CTL_TYPE_BYTES);
 			} else {
 				adsp_warn(
 					dsp,
@@ -2943,7 +2944,7 @@ static int wm_adsp2_setup_algs(struct wm_adsp *dsp)
 				len *= 4;
 				wm_adsp_create_control(
 					dsp, alg_region, 0, len, NULL, 0, 0,
-					SNDRV_CTL_ELEM_TYPE_BYTES);
+					WMFW_CTL_TYPE_BYTES);
 			} else {
 				adsp_warn(
 					dsp,
@@ -4299,6 +4300,9 @@ static int wm_coeff_k_put(struct snd_kcontrol *kctl,
 	char *p = ucontrol->value.bytes.data;
 	int ret = 0;
 
+	if (ctl->len > sizeof(ucontrol->value.bytes.data))
+		return -EINVAL;
+
 	if (ctl->flags & WMFW_CTL_FLAG_VOLATILE) {
 		ret = 0;
 	} else
@@ -4318,11 +4322,15 @@ static int wm_coeff_k_get(struct snd_kcontrol *kctl,
 	char *p = ucontrol->value.bytes.data;
 	int ret = 0;
 
+	if (ctl->len > sizeof(ucontrol->value.bytes.data))
+		return -EINVAL;
+
 	if (ctl->flags & WMFW_CTL_FLAG_VOLATILE) {
 		ret = wm_coeff_read_control(ctl, p, ctl->len);
 	} else {
 		ret = wm_coeff_read_control(ctl, ctl->cache, ctl->len);
-		memcpy(p, ctl->cache, ctl->len);
+		if (!ret)
+			memcpy(p, ctl->cache, ctl->len);
 	}
 
 	return ret;
@@ -4330,7 +4338,8 @@ static int wm_coeff_k_get(struct snd_kcontrol *kctl,
 static int wm_adsp_k_ctl_put(struct wm_adsp *dsp, const char *name, int value)
 {
 	struct snd_kcontrol *kctl = NULL;
-	struct snd_ctl_elem_value ucontrol;
+	struct snd_ctl_elem_value ucontrol = {0};
+	__be32 raw = cpu_to_be32(value);
 	struct snd_soc_card *card = dsp->component->card;
 
 	kctl = snd_soc_card_get_kcontrol(card, name);
@@ -4340,21 +4349,18 @@ static int wm_adsp_k_ctl_put(struct wm_adsp *dsp, const char *name, int value)
 	}
 
 	adsp_dbg(dsp, "%s: %s:0x%x\n", __func__, kctl->id.name, value);
-	value = cpu_to_be32(value);
-	memcpy((char *)ucontrol.value.bytes.data, (char *)&value,
-	       sizeof(value));
-	wm_coeff_k_put(kctl, &ucontrol);
-
-	return 0;
+	memcpy(ucontrol.value.bytes.data, &raw, sizeof(raw));
+	return wm_coeff_k_put(kctl, &ucontrol);
 }
 
 static int wm_adsp_k_ctl_get(struct wm_adsp *dsp, const char *name)
 {
 	struct snd_kcontrol *kctl = NULL;
-	struct snd_ctl_elem_value ucontrol;
+	struct snd_ctl_elem_value ucontrol = {0};
+	__be32 raw;
 	struct snd_soc_card *card = dsp->component->card;
 
-	int value = 0;
+	int value, ret;
 
 	kctl = snd_soc_card_get_kcontrol(card, name);
 	if (kctl == NULL) {
@@ -4362,10 +4368,11 @@ static int wm_adsp_k_ctl_get(struct wm_adsp *dsp, const char *name)
 		return -1;
 	}
 
-	wm_coeff_k_get(kctl, &ucontrol);
-	memcpy((char *)&value, (char *)ucontrol.value.bytes.data,
-	       sizeof(value));
-	value = be32_to_cpu(value);
+	ret = wm_coeff_k_get(kctl, &ucontrol);
+	if (ret)
+		return ret;
+	memcpy(&raw, ucontrol.value.bytes.data, sizeof(raw));
+	value = be32_to_cpu(raw);
 
 	adsp_dbg(dsp, "%s: %s:0x%x\n", __func__, kctl->id.name, value);
 
@@ -5013,7 +5020,7 @@ static int wm_adsp_read_data_block(struct wm_adsp *dsp, int mem_type,
 		return ret;
 
 	for (i = 0; i < num_words; ++i)
-		data[i] = be32_to_cpu(data[i]) & 0x00ffffffu;
+		data[i] = get_unaligned_be32(&data[i]) & 0x00ffffffu;
 
 	return 0;
 }
@@ -5029,15 +5036,16 @@ static int wm_adsp_write_data_word(struct wm_adsp *dsp, int mem_type,
 {
 	struct wm_adsp_region const *mem = wm_adsp_find_region(dsp, mem_type);
 	unsigned int reg;
+	__be32 val;
 
 	if (!mem)
 		return -EINVAL;
 
 	reg = wm_adsp_region_to_reg(dsp, mem, mem_addr);
 
-	data = cpu_to_be32(data & 0x00ffffffu);
+	val = cpu_to_be32(data & 0x00ffffffu);
 
-	return regmap_raw_write(dsp->regmap, reg, &data, sizeof(data));
+	return regmap_raw_write(dsp->regmap, reg, &val, sizeof(val));
 }
 
 static inline int wm_adsp_buffer_read(struct wm_adsp_compr_buf *buf,
@@ -5129,7 +5137,7 @@ static int wm_adsp_buffer_locate(struct wm_adsp_compr_buf *buf)
 	struct wm_adsp *dsp = buf->dsp;
 	struct wm_coeff_ctl *ctl;
 	unsigned int reg;
-	u32 val;
+	__be32 val;
 	int i, ret;
 
 	ctl = wm_adsp_find_host_buffer_ctrl(buf);
