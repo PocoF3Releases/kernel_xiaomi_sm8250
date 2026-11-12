@@ -279,19 +279,46 @@ static int get_step_chg_jeita_setting_from_profile(struct step_chg_info *chip)
 		return -EINVAL;
 	}
 
-	if (!is_bms_available(chip))
+	if (!is_bms_available(chip)) {
+		of_node_put(batt_node);
 		return -ENODEV;
+	}
 
-	power_supply_get_property(chip->bms_psy,
+	rc = power_supply_get_property(chip->bms_psy,
 			POWER_SUPPLY_PROP_RESISTANCE_ID, &prop);
+	if (rc < 0) {
+		of_node_put(batt_node);
+		return rc;
+	}
 	batt_id_ohms = prop.intval;
 
 	/* bms_psy has not yet read the batt_id */
-	if (batt_id_ohms < 0)
+	if (batt_id_ohms < 0) {
+		of_node_put(batt_node);
 		return -EBUSY;
+	}
 
-	profile_node = of_batterydata_get_best_profile(batt_node,
-					batt_id_ohms / 1000, NULL);
+	if (of_property_read_bool(chip->dev->of_node,
+				"qcom,jeita-use-bms-battery-type")) {
+		/* Equal ID resistors cannot distinguish alioth replacement packs. */
+		rc = power_supply_get_property(chip->bms_psy,
+				POWER_SUPPLY_PROP_BATTERY_TYPE, &prop);
+		if (rc < 0 || !prop.strval) {
+			of_node_put(batt_node);
+			return -EBUSY;
+		}
+		profile_node = of_batterydata_get_best_profile(batt_node,
+				batt_id_ohms / 1000, prop.strval);
+		/* Loading/unknown names must not silently select the first pack. */
+		if (IS_ERR_OR_NULL(profile_node)) {
+			of_node_put(batt_node);
+			return -EBUSY;
+		}
+	} else {
+		profile_node = of_batterydata_get_best_profile(batt_node,
+				batt_id_ohms / 1000, NULL);
+	}
+	of_node_put(batt_node);
 	if (IS_ERR(profile_node))
 		return PTR_ERR(profile_node);
 
