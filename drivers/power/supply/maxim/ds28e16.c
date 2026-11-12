@@ -30,7 +30,6 @@
 #include <linux/gpio/consumer.h>
 #include <linux/regmap.h>
 #include <linux/random.h>
-#include <linux/sched.h>
 
 #define ds_info pr_info
 #define ds_dbg pr_debug
@@ -91,39 +90,11 @@ unsigned char mi_page1_data[16] = { 0x00 };
 unsigned char mi_counter[16] = { 0x00 };
 int mi_auth_result = 0x00;
 
-static void set_sched_affinity_to_current(void)
-{
-	long ret;
-	int current_cpu;
-
-	preempt_disable();
-	current_cpu = smp_processor_id();
-	ret = sched_setaffinity(CURRENT_DS28E16_TASK, cpumask_of(current_cpu));
-	preempt_enable();
-	if (ret) {
-		pr_info("Setting cpu affinity to current cpu failed(%ld) in %s.\n",
-			ret, __func__);
-	} else {
-		pr_info("Setting cpu affinity to current cpu(%d) in %s.\n",
-			current_cpu, __func__);
-	}
-}
-
-static void set_sched_affinity_to_all(void)
-{
-	long ret;
-	cpumask_t dstp;
-
-	cpumask_setall(&dstp);
-	ret = sched_setaffinity(CURRENT_DS28E16_TASK, &dstp);
-	if (ret) {
-		pr_info("Setting cpu affinity to all valid cpus failed(%ld) in %s.\n",
-			ret, __func__);
-	} else {
-		pr_info("Setting cpu affinity to all valid cpus in %s.\n",
-			__func__);
-	}
-}
+/*
+ * The 1-Wire GPIO layer protects timing-critical slots with IRQ-safe locking.
+ * Do not change the caller's affinity here: workqueue workers may prohibit it,
+ * and restoring an all-CPU mask would discard the caller's original limits.
+ */
 
 unsigned char crc_low_first(unsigned char *ptr, unsigned char len)
 {
@@ -187,16 +158,13 @@ static int ds28el16_Read_RomID_retry(unsigned char *RomID)
 {
 	int i;
 
-	set_sched_affinity_to_current();
 	for (i = 0; i < GET_ROM_ID_RETRY; i++) {
 		ds_info("read rom id communication start %d...\n", i);
 
 		if (Read_RomID(RomID) == DS_TRUE) {
-			set_sched_affinity_to_all();
 			return DS_TRUE;
 		}
 	}
-	set_sched_affinity_to_all();
 	return DS_FALSE;
 }
 
@@ -204,16 +172,13 @@ static int ds28el16_get_page_status_retry(unsigned char *data)
 {
 	int i;
 
-	set_sched_affinity_to_current();
 	for (i = 0; i < GET_BLOCK_STATUS_RETRY; i++) {
 		ds_info("read page status communication start... %d\n", i);
 
 		if (DS28E16_cmd_readStatus(data) == DS_TRUE) {
-			set_sched_affinity_to_all();
 			return DS_TRUE;
 		}
 	}
-	set_sched_affinity_to_all();
 
 	return DS_FALSE;
 }
@@ -225,16 +190,13 @@ static int ds28el16_get_page_data_retry(int page, unsigned char *data)
 	if (page >= MAX_PAGENUM)
 		return DS_FALSE;
 
-	set_sched_affinity_to_current();
 	for (i = 0; i < GET_USER_MEMORY_RETRY; i++) {
 		ds_dbg("read page data communication start... %d\n", i);
 
 		if (DS28E16_cmd_readMemory(page, data) == DS_TRUE) {
-			set_sched_affinity_to_all();
 			return DS_TRUE;
 		}
 	}
-	set_sched_affinity_to_all();
 
 	return DS_FALSE;
 }
@@ -978,19 +940,16 @@ static int ds28el16_do_authentication(struct ds28e16_data *data)
 
 	ds_log("%s enter\n", __func__);
 
-	set_sched_affinity_to_current();
 	for (i = 0; i < GET_VERIFY_RETRY; i++) {
 		result = AuthenticateDS28E16(auth_ANON, auth_BDCONST, 0,
 					     pagenumber, challenge,
 					     session_seed, S_secret);
 		if (result == DS_TRUE) {
 			data->batt_verified = 1;
-			set_sched_affinity_to_all();
 			ds_log("%s battery verify ok[%d]", __func__, result);
 			return result;
 		}
 	}
-	set_sched_affinity_to_all();
 
 	if (result != DS_TRUE) {
 		data->batt_verified = 0;
@@ -1019,6 +978,19 @@ static enum power_supply_property verify_props[] = {
 	POWER_SUPPLY_PROP_MAXIM_BATT_CYCLE_COUNT,
 	POWER_SUPPLY_PROP_AUTHENTIC,
 };
+
+static int ds28e16_decode_cycle_count(const u8 *page, int *cycles)
+{
+	u32 remaining;
+
+	if (!page || !cycles)
+		return -EINVAL;
+	remaining = page[0] | (u32)page[1] << 8 | (u32)page[2] << 16;
+	if (remaining > DC_INIT_VALUE)
+		return -ERANGE;
+	*cycles = DC_INIT_VALUE - remaining;
+	return 0;
+}
 
 static int verify_get_property(struct power_supply *psy,
 			       enum power_supply_property psp,
@@ -1110,11 +1082,12 @@ static int verify_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_MAXIM_BATT_CYCLE_COUNT:
 		ret = ds28el16_get_page_data_retry(DC_PAGE, pagedata);
-		if (ret == DS_TRUE) {
-			data->cycle_count = (pagedata[2] << 16) +
-					    (pagedata[1] << 8) + pagedata[0];
-			val->intval = DC_INIT_VALUE - data->cycle_count;
-		}
+		if (ret != DS_TRUE)
+			return -EIO;
+		ret = ds28e16_decode_cycle_count(pagedata, &val->intval);
+		if (ret < 0)
+			return ret;
+		data->cycle_count = DC_INIT_VALUE - val->intval;
 		break;
 	default:
 		ds_dbg("unsupported property %d\n", psp);
@@ -1161,7 +1134,10 @@ static int verify_set_property(struct power_supply *psy,
 		auth_BDCONST = val->intval;
 		break;
 	case POWER_SUPPLY_PROP_MAXIM_BATT_CYCLE_COUNT:
-		DS28E16_cmd_decrementCounter();
+		if (val->intval != 1)
+			return -EINVAL;
+		if (DS28E16_cmd_decrementCounter() != DS_TRUE)
+			return -EIO;
 		break;
 	case POWER_SUPPLY_PROP_AUTHENTIC:
 		if (val->intval == 1) {
@@ -1226,11 +1202,6 @@ static int verify_psy_register(struct ds28e16_data *ds)
 	ds_log("%s power supply register successfully\n",
 	       ds->verify_psy_d.name);
 	return 0;
-}
-
-static void verify_psy_unregister(struct ds28e16_data *ds)
-{
-	power_supply_unregister(ds->verify_psy);
 }
 
 // parse dts
@@ -1732,8 +1703,6 @@ static int ds28e16_probe(struct platform_device *pdev)
 	ds28e16_data->pdev = pdev;
 	platform_set_drvdata(pdev, ds28e16_data);
 	INIT_DELAYED_WORK(&ds28e16_data->battery_verify_work, battery_verify);
-	schedule_delayed_work(&ds28e16_data->battery_verify_work,
-			      msecs_to_jiffies(0));
 	retval = verify_psy_register(ds28e16_data);
 	if (retval) {
 		ds_err("Failed to verify_psy_register, err:%d\n", retval);
@@ -1746,14 +1715,15 @@ static int ds28e16_probe(struct platform_device *pdev)
 		goto ds28e16_create_group_err;
 	}
 
+	schedule_delayed_work(&ds28e16_data->battery_verify_work,
+			      msecs_to_jiffies(0));
+
 	return 0;
 
 ds28e16_create_group_err:
-	//sysfs_remove_groups(&ds28e16_data->dev->kobj, &(&ds_attr_group));
 ds28e16_psy_register_err:
 	dev_set_drvdata(ds28e16_data->dev, NULL);
 ds28e16_parse_dt_err:
-	kfree(ds28e16_data);
 	return retval;
 }
 
@@ -1761,33 +1731,11 @@ static int ds28e16_remove(struct platform_device *pdev)
 {
 	struct ds28e16_data *ds28e16_data = platform_get_drvdata(pdev);
 
-	verify_psy_unregister(ds28e16_data);
-	kfree(ds28e16_data);
+	sysfs_remove_group(&pdev->dev.kobj, &ds_attr_group);
+	cancel_delayed_work_sync(&ds28e16_data->battery_verify_work);
+	platform_set_drvdata(pdev, NULL);
 	return 0;
 }
-
-static long ds28e16_dev_ioctl(struct file *file, unsigned int cmd,
-			      unsigned long arg)
-{
-	ds_log("%d, cmd: 0x%x\n", __LINE__, cmd);
-	return 0;
-}
-static int ds28e16_dev_open(struct inode *inode, struct file *file)
-{
-	return 0;
-}
-
-static int ds28e16_dev_release(struct inode *inode, struct file *file)
-{
-	return 0;
-}
-
-static const struct file_operations ds28e16_dev_fops = {
-	.owner = THIS_MODULE,
-	.open = ds28e16_dev_open,
-	.unlocked_ioctl = ds28e16_dev_ioctl,
-	.release = ds28e16_dev_release,
-};
 
 static const struct of_device_id ds28e16_dt_match[] = {
 	{ .compatible = "maxim,ds28e16" },
