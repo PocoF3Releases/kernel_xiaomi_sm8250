@@ -136,7 +136,7 @@
  *	This event is triggered from the input event thread when touch event is
  *	received from the input device. On receiving this event,
  *      - If the device is in SDE_ENC_RC_STATE_IDLE state, it turns ON the
-	  clocks and enable RSC.
+ *        clocks and enable RSC.
  *      - If the device is in SDE_ENC_RC_STATE_ON state, it resets the delayed
  *        off work since a new commit is imminent.
  */
@@ -173,8 +173,14 @@ enum sde_enc_rc_states {
  *	encoders manage one intf block, tied to a specific panel/sub-panel.
  *	Virtual encoder defers as much as possible to the physical encoders.
  *	Virtual encoder registers itself with the DRM Framework as the encoder.
+ * @vblank_ctl_lock: Mutex serializing vblank control
+ * @display_num_of_h_tiles: Number of horizontal display tiles
+ * @hw_dsc_pp: Pingpong blocks associated with DSC encoders
+ * @input_handler_registered: Whether the input handler is registered
+ * @prepare_kickoff: Tracks preparation of the next kickoff
+ * @ready_kickoff: Tracks readiness for the next kickoff
  * @base:		drm_encoder base class for registration with DRM
- * @enc_spin_lock:	Virtual-Encoder-Wide Spin Lock for IRQ purposes
+ * @enc_spinlock:	Virtual-Encoder-Wide Spin Lock for IRQ purposes
  * @bus_scaling_client:	Client handle to the bus scaling interface
  * @te_source:		vsync source pin information
  * @ops:		Encoder ops from init function
@@ -184,14 +190,14 @@ enum sde_enc_rc_states {
  * @phys_cmd_encs:		Command physical encoders for panel mode switch.
  * @cur_master:		Pointer to the current master in this mode. Optimization
  *			Only valid after enable. Cleared as disable.
- * @hw_pp		Handle to the pingpong blocks used for the display. No.
+ * @hw_pp: Handle to the pingpong blocks used for the display. No.
  *			pingpong blocks can be different than num_phys_encs.
  * @hw_dsc:		Array of DSC block handles used for the display.
  * @dirty_dsc_ids:	Cached dsc indexes for dirty DSC blocks needing flush
- * @intfs_swapped	Whether or not the phys_enc interfaces have been swapped
+ * @intfs_swapped: Whether or not the phys_enc interfaces have been swapped
  *			for partial update right-only cases, such as pingpong
  *			split where virtual pingpong does not generate IRQs
- @qdss_status:		indicate if qdss is modified since last update
+ * @qdss_status:		indicate if qdss is modified since last update
  * @crtc_vblank_cb:	Callback into the upper layer / CRTC for
  *			notification of the VBLANK
  * @crtc_vblank_cb_data:	Data from upper layer for VBLANK notification
@@ -200,7 +206,7 @@ enum sde_enc_rc_states {
  * @crtc_kickoff_cb_data:	Opaque user data given to crtc_kickoff_cb
  * @debugfs_root:		Debug file system root file node
  * @enc_lock:			Lock around physical encoder create/destroy and
-				access.
+ *				access.
  * @frame_done_cnt:		Atomic counter for tracking which phys_enc is
  *				done with frame processing.
  * @crtc_frame_event_cb:	callback handler for frame event
@@ -231,7 +237,7 @@ enum sde_enc_rc_states {
  * @rsc_config:			rsc configuration for display vtotal, fps, etc.
  * @cur_conn_roi:		current connector roi
  * @prv_conn_roi:		previous connector roi to optimize if unchanged
- * @crtc			pointer to drm_crtc
+ * @crtc: pointer to drm_crtc
  * @recovery_events_enabled:	status of hw recovery feature enable by client
  * @elevated_ahb_vote:		increase AHB bus speed for the first frame
  *				after power collapse
@@ -286,7 +292,6 @@ struct sde_encoder_virt {
 	struct kthread_delayed_work delayed_off_work;
 	struct kthread_work vsync_event_work;
 	struct kthread_work input_event_work;
-	struct kthread_work touch_notify_work;
 	struct kthread_work esd_trigger_work;
 	struct input_handler *input_handler;
 	bool input_handler_registered;
@@ -1148,7 +1153,6 @@ static int sde_encoder_virt_atomic_check(
 	struct sde_encoder_virt *sde_enc;
 	struct msm_drm_private *priv;
 	struct sde_kms *sde_kms;
-	const struct drm_display_mode *mode;
 	struct drm_display_mode *adj_mode;
 	struct sde_connector *sde_conn = NULL;
 	struct sde_connector_state *sde_conn_state = NULL;
@@ -1168,7 +1172,6 @@ static int sde_encoder_virt_atomic_check(
 
 	priv = drm_enc->dev->dev_private;
 	sde_kms = to_sde_kms(priv->kms);
-	mode = &crtc_state->mode;
 	adj_mode = &crtc_state->adjusted_mode;
 	sde_conn = to_sde_connector(conn_state->connector);
 	sde_conn_state = to_sde_connector_state(conn_state);
@@ -1700,7 +1703,6 @@ static int _sde_encoder_dsc_2_lm_2_enc_1_intf(struct sde_encoder_virt *sde_enc,
 static int _sde_encoder_update_roi(struct drm_encoder *drm_enc)
 {
 	struct sde_encoder_virt *sde_enc;
-	struct drm_connector *drm_conn;
 	struct drm_display_mode *adj_mode;
 	struct sde_rect roi;
 
@@ -1721,7 +1723,6 @@ static int _sde_encoder_update_roi(struct drm_encoder *drm_enc)
 	}
 
 	adj_mode = &sde_enc->cur_master->cached_mode;
-	drm_conn = sde_enc->cur_master->connector;
 
 	_sde_encoder_get_connector_roi(sde_enc, &roi);
 	if (sde_kms_rect_is_null(&roi)) {
@@ -2284,6 +2285,7 @@ static int _sde_encoder_resource_control_helper(struct drm_encoder *drm_enc,
 		/* enable SDE core clks */
 		rc = pm_runtime_get_sync(drm_enc->dev->dev);
 		if (rc < 0) {
+			pm_runtime_put_noidle(drm_enc->dev->dev);
 			SDE_ERROR("failed to enable power resource %d\n", rc);
 			SDE_EVT32(rc, SDE_EVTLOG_ERROR);
 			return rc;
@@ -2377,8 +2379,6 @@ static void sde_encoder_input_event_handler(struct input_handle *handle,
 	SDE_EVT32_VERBOSE(DRMID(drm_enc));
 
 	disp_thread = &priv->disp_thread[sde_enc->crtc->index];
-	kthread_queue_work(&disp_thread->worker,
-				&sde_enc->touch_notify_work);
 
 	/* Only consider EV_ABS (touch) events in QC original design */
 	if (type == EV_ABS && sde_encoder_check_curr_mode(drm_enc, MSM_DISPLAY_CMD_MODE))
@@ -3212,7 +3212,7 @@ static void _sde_encoder_input_disconnect(struct input_handle *handle)
 }
 
 /**
- * Structure for specifying event parameters on which to receive callbacks.
+ * DOC: sde_input_ids - Structure for specifying event parameters on which to receive callbacks.
  * This structure will trigger a callback in case of a touch event (specified by
  * EV_ABS) where there is a change in X and Y coordinates,
  */
@@ -3396,14 +3396,12 @@ static void sde_encoder_virt_enable(struct drm_encoder *drm_enc)
 	int i, ret = 0;
 	struct msm_compression_info *comp_info = NULL;
 	struct drm_display_mode *cur_mode = NULL;
-	struct msm_display_info *disp_info;
 
 	if (!drm_enc) {
 		SDE_ERROR("invalid encoder\n");
 		return;
 	}
 	sde_enc = to_sde_encoder_virt(drm_enc);
-	disp_info = &sde_enc->disp_info;
 
 	if (!sde_kms_power_resource_is_enabled(drm_enc->dev)) {
 		SDE_ERROR("power resource is not enabled\n");
@@ -3545,8 +3543,6 @@ void sde_encoder_virt_reset(struct drm_encoder *drm_enc)
 static void sde_encoder_virt_disable(struct drm_encoder *drm_enc)
 {
 	struct sde_encoder_virt *sde_enc = NULL;
-	struct msm_drm_private *priv;
-	struct sde_kms *sde_kms;
 	enum sde_intf_mode intf_mode;
 	int i = 0;
 
@@ -3569,8 +3565,6 @@ static void sde_encoder_virt_disable(struct drm_encoder *drm_enc)
 	sde_enc = to_sde_encoder_virt(drm_enc);
 	SDE_DEBUG_ENC(sde_enc, "\n");
 
-	priv = drm_enc->dev->dev_private;
-	sde_kms = to_sde_kms(priv->kms);
 	intf_mode = sde_encoder_get_intf_mode(drm_enc);
 
 	SDE_EVT32(DRMID(drm_enc));
@@ -3721,7 +3715,7 @@ static enum sde_wb sde_encoder_get_wb(struct sde_mdss_cfg *catalog,
 	return WB_MAX;
 }
 
-void sde_encoder_perf_uidle_status(struct sde_kms *sde_kms,
+static void sde_encoder_perf_uidle_status(struct sde_kms *sde_kms,
 	struct drm_crtc *crtc)
 {
 	struct sde_hw_uidle *uidle;
@@ -3888,7 +3882,7 @@ static void sde_encoder_frame_done_callback(
 
 	if (!drm_enc || !sde_enc->cur_master) {
 		SDE_ERROR("invalid param: drm_enc %pK, cur_master %pK\n",
-				drm_enc, drm_enc ? sde_enc->cur_master : 0);
+				drm_enc, drm_enc ? sde_enc->cur_master : NULL);
 		return;
 	}
 
@@ -4009,9 +4003,9 @@ int sde_encoder_idle_request(struct drm_encoder *drm_enc)
 
 /**
  * _sde_encoder_trigger_flush - trigger flush for a physical encoder
- * drm_enc: Pointer to drm encoder structure
- * phys: Pointer to physical encoder structure
- * extra_flush: Additional bit mask to include in flush trigger
+ * @drm_enc: Pointer to drm encoder structure
+ * @phys: Pointer to physical encoder structure
+ * @extra_flush: Additional bit mask to include in flush trigger
  */
 static inline void _sde_encoder_trigger_flush(struct drm_encoder *drm_enc,
 		struct sde_encoder_phys *phys,
@@ -4100,7 +4094,7 @@ static inline void _sde_encoder_trigger_flush(struct drm_encoder *drm_enc,
 
 /**
  * _sde_encoder_trigger_start - trigger start for a physical encoder
- * phys: Pointer to physical encoder structure
+ * @phys: Pointer to physical encoder structure
  */
 static inline void _sde_encoder_trigger_start(struct sde_encoder_phys *phys)
 {
@@ -4217,7 +4211,7 @@ void sde_encoder_helper_hw_reset(struct sde_encoder_phys *phys_enc)
  *	encoder rather than the individual physical ones in order to handle
  *	use cases that require visibility into multiple physical encoders at
  *	a time.
- * sde_enc: Pointer to virtual encoder structure
+ * @sde_enc: Pointer to virtual encoder structure
  */
 static void _sde_encoder_kickoff_phys(struct sde_encoder_virt *sde_enc)
 {
@@ -4244,7 +4238,6 @@ static void _sde_encoder_kickoff_phys(struct sde_encoder_virt *sde_enc)
 	/* don't perform flush/start operations for slave encoders */
 	for (i = 0; i < sde_enc->num_phys_encs; i++) {
 		struct sde_encoder_phys *phys = sde_enc->phys_encs[i];
-		enum sde_rm_topology_name topology = SDE_RM_TOPOLOGY_NONE;
 
 		if (!phys || phys->enable_state == SDE_ENC_DISABLED)
 			continue;
@@ -4253,15 +4246,12 @@ static void _sde_encoder_kickoff_phys(struct sde_encoder_virt *sde_enc)
 		if (!ctl)
 			continue;
 
-		if (phys->connector)
-			topology = sde_connector_get_topology_name(
-					phys->connector);
 
 		if (!phys->ops.needs_single_flush ||
 				!phys->ops.needs_single_flush(phys)) {
 			if (ctl->ops.reg_dma_flush)
 				ctl->ops.reg_dma_flush(ctl, is_regdma_blocking);
-			_sde_encoder_trigger_flush(&sde_enc->base, phys, 0x0);
+			_sde_encoder_trigger_flush(&sde_enc->base, phys, NULL);
 		} else if (ctl->ops.get_pending_flush) {
 			ctl->ops.get_pending_flush(ctl, &pending_flush);
 		}
@@ -4719,26 +4709,6 @@ static void sde_encoder_input_event_work_handler(struct kthread_work *work)
 			SDE_ENC_RC_EVENT_EARLY_WAKEUP);
 }
 
-static void sde_encoder_touch_notify_work_handler(struct kthread_work *work)
-{
-	struct dsi_bridge *c_bridge = NULL;
-	struct dsi_display *dsi_display = NULL;
-	struct drm_encoder *drm_enc = NULL;
-	struct sde_encoder_virt *sde_enc = container_of(work,
-				struct sde_encoder_virt, touch_notify_work);
-
-	if (!sde_enc) {
-		SDE_ERROR("invalid encoder for the touch notify\n");
-		return;
-	}
-
-	drm_enc = &sde_enc->base;
-
-	c_bridge = container_of(drm_enc->bridge, struct dsi_bridge, base);
-	if (c_bridge)
-		dsi_display = c_bridge->display;
-}
-
 static void sde_encoder_vsync_event_work_handler(struct kthread_work *work)
 {
 	struct sde_encoder_virt *sde_enc = container_of(work,
@@ -4756,6 +4726,7 @@ static void sde_encoder_vsync_event_work_handler(struct kthread_work *work)
 	drm_enc = &sde_enc->base;
 	rc = pm_runtime_get_sync(drm_enc->dev->dev);
 	if (rc < 0) {
+		pm_runtime_put_noidle(drm_enc->dev->dev);
 		SDE_ERROR_ENC(sde_enc, "sde enc power enabled failed:%d\n", rc);
 		return;
 	}
@@ -4973,11 +4944,9 @@ int sde_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc,
 	struct sde_encoder_virt *sde_enc;
 	struct sde_encoder_phys *phys;
 	struct sde_kms *sde_kms = NULL;
-	struct sde_crtc *sde_crtc;
 	struct msm_drm_private *priv = NULL;
 	bool needs_hw_reset = false, is_cmd_mode;
 	int i, rc, ret = 0;
-	struct msm_display_info *disp_info;
 
 	if (!drm_enc || !params || !drm_enc->dev ||
 		!drm_enc->dev->dev_private) {
@@ -4987,8 +4956,6 @@ int sde_encoder_prepare_for_kickoff(struct drm_encoder *drm_enc,
 	sde_enc = to_sde_encoder_virt(drm_enc);
 	priv = drm_enc->dev->dev_private;
 	sde_kms = to_sde_kms(priv->kms);
-	disp_info = &sde_enc->disp_info;
-	sde_crtc = to_sde_crtc(sde_enc->crtc);
 
 	SDE_DEBUG_ENC(sde_enc, "\n");
 	SDE_EVT32(DRMID(drm_enc));
@@ -5086,7 +5053,7 @@ end:
 /**
  * _sde_encoder_reset_ctl_hw - reset h/w configuration for all ctl's associated
  *	with the specified encoder, and unstage all pipes from it
- * @encoder:	encoder pointer
+ * @drm_enc:	encoder pointer
  * Returns: 0 on success
  */
 static int _sde_encoder_reset_ctl_hw(struct drm_encoder *drm_enc)
@@ -5131,8 +5098,6 @@ void sde_encoder_kickoff(struct drm_encoder *drm_enc, bool is_error)
 	struct dsi_display_mode adj_mode;
 	ktime_t wakeup_time;
 	unsigned int i;
-	struct sde_kms *sde_kms = NULL;
-	struct msm_drm_private *priv = NULL;
 
 	if (!drm_enc) {
 		SDE_ERROR("invalid encoder\n");
@@ -5185,11 +5150,6 @@ void sde_encoder_kickoff(struct drm_encoder *drm_enc, bool is_error)
 		mutex_unlock(&dsi_display->panel->panel_lock);
 	}
 
-	priv = sde_enc->base.dev->dev_private;
-	if (priv != NULL) {
-		sde_kms = to_sde_kms(priv->kms);
-		sde_kms_kickoff_count(sde_kms);
-	}
 
 	SDE_ATRACE_END("encoder_kickoff");
 }
@@ -5418,8 +5378,10 @@ static ssize_t _sde_encoder_misr_setup(struct file *file,
 		return -EINVAL;
 
 	rc = pm_runtime_get_sync(drm_enc->dev->dev);
-	if (rc < 0)
+	if (rc < 0) {
+		pm_runtime_put_noidle(drm_enc->dev->dev);
 		return rc;
+	}
 
 	sde_enc->misr_enable = enable;
 	sde_enc->misr_frame_count = frame_count;
@@ -5457,8 +5419,10 @@ static ssize_t _sde_encoder_misr_read(struct file *file,
 	drm_enc = &sde_enc->base;
 
 	rc = pm_runtime_get_sync(drm_enc->dev->dev);
-	if (rc < 0)
+	if (rc < 0) {
+		pm_runtime_put_noidle(drm_enc->dev->dev);
 		return rc;
+	}
 
 	if (!sde_enc->misr_enable) {
 		len += scnprintf(buf + len, MISR_BUFF_SIZE - len,
@@ -5514,8 +5478,6 @@ end:
 static int _sde_encoder_init_debugfs(struct drm_encoder *drm_enc)
 {
 	struct sde_encoder_virt *sde_enc;
-	struct msm_drm_private *priv;
-	struct sde_kms *sde_kms;
 	int i;
 
 	static const struct file_operations debugfs_status_fops = {
@@ -5539,8 +5501,6 @@ static int _sde_encoder_init_debugfs(struct drm_encoder *drm_enc)
 	}
 
 	sde_enc = to_sde_encoder_virt(drm_enc);
-	priv = drm_enc->dev->dev_private;
-	sde_kms = to_sde_kms(priv->kms);
 
 	snprintf(name, SDE_NAME_SIZE, "encoder%u", drm_enc->base.id);
 
@@ -5943,8 +5903,6 @@ struct drm_encoder *sde_encoder_init_with_ops(
 	kthread_init_work(&sde_enc->input_event_work,
 			sde_encoder_input_event_work_handler);
 
-	kthread_init_work(&sde_enc->touch_notify_work,
-			sde_encoder_touch_notify_work_handler);
 
 	kthread_init_work(&sde_enc->esd_trigger_work,
 			sde_encoder_esd_trigger_work_handler);
@@ -6174,10 +6132,10 @@ static void _sde_encoder_cache_hw_res_cont_splash(
 /**
  * sde_encoder_update_caps_for_cont_splash - update encoder settings during
  *	device bootup when cont_splash is enabled
- * @drm_enc:	Pointer to drm encoder structure
+ * @encoder:	Pointer to drm encoder structure
  * @splash_display: Pointer to sde_splash_display corresponding to this encoder
  * @enable:	boolean indicates enable or displae state of splash
- * @Return:	true if successful in updating the encoder structure
+ * Return:	true if successful in updating the encoder structure
  */
 int sde_encoder_update_caps_for_cont_splash(struct drm_encoder *encoder,
 		struct sde_splash_display *splash_display, bool enable)
