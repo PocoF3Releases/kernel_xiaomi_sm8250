@@ -3472,16 +3472,13 @@ static int mi_dsi_update_lhbm_cmd_87reg(struct dsi_panel *panel,
 
 bool dsi_panel_is_need_tx_cmd(u32 param)
 {
-	if ((param & 0x0F000000) != DISPPARAM_FOD_BACKLIGHT_ON
-		|| (param & 0x0F000000) != DISPPARAM_FOD_BACKLIGHT_OFF
-		|| param != DISPPARAM_FOD_UNLOCK_SUCCESS
-		|| param != DISPPARAM_SET_THERMAL_HBM_DISABLE
-		|| param != DISPPARAM_CLEAR_THERMAL_HBM_DISABLE
-		|| (param & 0x0000F000) != DISPPARAM_LOW_BRIGHTNESS_FOD
-		|| (param & 0x0000F000) != DISPPARAM_FP_STATUS) {
-		return false;
-	}else
-		return true;
+	return (param & 0x0F000000) != DISPPARAM_FOD_BACKLIGHT_ON &&
+		(param & 0x0F000000) != DISPPARAM_FOD_BACKLIGHT_OFF &&
+		param != DISPPARAM_FOD_UNLOCK_SUCCESS &&
+		param != DISPPARAM_SET_THERMAL_HBM_DISABLE &&
+		param != DISPPARAM_CLEAR_THERMAL_HBM_DISABLE &&
+		(param & 0x0000F000) != DISPPARAM_LOW_BRIGHTNESS_FOD &&
+		(param & 0x0000F000) != DISPPARAM_FP_STATUS;
 }
 
 int dsi_panel_set_disp_param(struct dsi_panel *panel, u32 param)
